@@ -1,0 +1,215 @@
+[
+  {
+    "id": "5010d0e8984a412c",
+    "type": "tab",
+    "label": "Classroom 5402 - MANUAL FAST v3",
+    "disabled": false,
+    "info": "Manual commands fast path: no 3-second gap for changes. OFF immediately, OFF→ON min 5 min. Import only one active flow; configure persistent contextStorage and use private MQTT broker for deployment."
+  },
+  {
+    "id": "a34ac48754d948af",
+    "type": "mqtt-broker",
+    "name": "TEST ONLY - use private broker for deployment",
+    "broker": "broker.emqx.io",
+    "port": "1883",
+    "clientid": "nodered_classroom5402_fast_v3",
+    "autoConnect": true,
+    "usetls": false,
+    "protocolVersion": "4",
+    "keepalive": "60",
+    "cleansession": true,
+    "autoUnsubscribe": true,
+    "birthTopic": "",
+    "birthQos": "0",
+    "birthPayload": "",
+    "birthMsg": {},
+    "closeTopic": "",
+    "closeQos": "0",
+    "closePayload": "",
+    "closeMsg": {},
+    "willTopic": "",
+    "willQos": "0",
+    "willPayload": "",
+    "willMsg": {}
+  },
+  {
+    "id": "69d07feb3a1a4acb",
+    "type": "mqtt in",
+    "z": "5010d0e8984a412c",
+    "name": "MANUAL fast request • QoS0 • reject retained",
+    "topic": "spu/classroom/webapp/cmd",
+    "qos": "0",
+    "datatype": "utf8",
+    "broker": "a34ac48754d948af",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 220,
+    "y": 120,
+    "wires": [
+      [
+        "6cf11f08462a4b9e"
+      ]
+    ]
+  },
+  {
+    "id": "d303d4a8fe9b4a43",
+    "type": "mqtt in",
+    "z": "5010d0e8984a412c",
+    "name": "ESP32 last commanded state",
+    "topic": "spu/classroom/status",
+    "qos": "0",
+    "datatype": "utf8",
+    "broker": "a34ac48754d948af",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 190,
+    "y": 190,
+    "wires": [
+      [
+        "6cf11f08462a4b9e"
+      ]
+    ]
+  },
+  {
+    "id": "5470b1711b184771",
+    "type": "inject",
+    "z": "5010d0e8984a412c",
+    "name": "Safety timer for deferred ON only (1s)",
+    "props": [
+      {
+        "p": "topic",
+        "v": "__tick",
+        "vt": "str"
+      },
+      {
+        "p": "payload",
+        "v": "tick",
+        "vt": "str"
+      }
+    ],
+    "repeat": "1",
+    "crontab": "",
+    "once": true,
+    "onceDelay": "1",
+    "topic": "__tick",
+    "payload": "tick",
+    "payloadType": "str",
+    "x": 205,
+    "y": 260,
+    "wires": [
+      [
+        "6cf11f08462a4b9e"
+      ]
+    ]
+  },
+  {
+    "id": "6cf11f08462a4b9e",
+    "type": "function",
+    "z": "5010d0e8984a412c",
+    "name": "MANUAL FAST • OFF immediate • ON anti-short-cycle",
+    "func": "// SMART CLASSROOM MANUAL FAST (works with the ORIGINAL ESP32 firmware).\n// Browser: publishes every click immediately. This node never waits for an ACK.\n// ON->temperature/mode/fan edits: directly forwarded without a 3-second IR gap.\n// OFF: immediate, cancels a delayed ON. OFF->ON: protected for 5 minutes.\n// Import only ONE active Safety Flow; do not publish directly from the web to ESP32.\nconst TOP_WEB = 'spu/classroom/webapp/cmd';\nconst TOP_IR = 'spu/classroom/remote/air';\nconst TOP_ESP = 'spu/classroom/status';\nconst TOP_REPLY = 'spu/classroom/webapp/status';\nconst MIN_OFF_MS = 5 * 60 * 1000;        // adjust to manufacturer requirements\nconst RESTART_HOLD_MS = 5 * 60 * 1000;   // unknown OFF history after restart\nconst MAX_PENDING_MS = 6 * 60 * 1000;    // latest deferred ON expires after 6m\nconst MAX_MESSAGE_AGE_MS = 60 * 1000;   // ignore old browser commands\nconst DEVICE_STATUS_FRESH_MS = 75 * 1000;\nconst now = Date.now();\nconst bootAt = context.get('fastBootAt') || now;\nlet liveOnSinceBoot = context.get('freshOnSinceBoot') === true;\nlet s = context.get('manualFastSafetyV3');\nif (!s || typeof s !== 'object') {\n  s = {lastOffAt:0,lastForwarded:null,lastForwardedAt:0,pending:null,lastDevicePower:null,lastDeviceStatusAt:0};\n}\n// Pending requests are never replayed after a restart / redeploy.\nif (s.pending && (!Number.isFinite(s.pending.createdAt) || s.pending.createdAt < bootAt)) s.pending = null;\nconst outIR=[], outFeedback=[], outDebug=[];\nconst emit = (id,stage,reason='',waitMs=0) => {\n  if (!id) return;\n  outFeedback.push({topic:TOP_REPLY,qos:0,retain:false,payload:JSON.stringify({\n    requestId:id,stage,reason,waitSeconds:Math.ceil(Math.max(0,waitMs)/1000),at:new Date(now).toISOString()\n  })});\n};\nconst trace = (value) => outDebug.push({payload:value});\nconst valid = o => o && typeof o==='object' && !Array.isArray(o)\n  && (o.POWER===0 || o.POWER===1)\n  && Number.isInteger(o.TEMP) && o.TEMP>=21 && o.TEMP<=27\n  && Number.isInteger(o.MODE) && o.MODE>=0 && o.MODE<=2\n  && Number.isInteger(o.FAN) && o.FAN>=0 && o.FAN<=3\n  && typeof o.REQUEST_ID==='string' && /^[A-Za-z0-9_-]{2,100}$/.test(o.REQUEST_ID)\n  && (o.SENT_AT===undefined || (Number.isSafeInteger(o.SENT_AT) && o.SENT_AT>0));\nconst forward = (item) => {\n  const cmd=item.cmd;\n  // Metadata is stripped! Original ESP32 recognizes only upper-case fields.\n  outIR.push({topic:TOP_IR,qos:0,retain:false,payload:JSON.stringify(cmd)});\n  s.lastForwarded={...cmd};\n  s.lastForwardedAt=now;\n  if (cmd.POWER===0) {\n    s.lastOffAt=now;\n    liveOnSinceBoot=false;\n    context.set('freshOnSinceBoot',false);\n  }\n  emit(item.id,'IR_FORWARDED','Node-RED forwarded to ESP32 MQTT topic; physical AC not verified');\n  trace('IR_FORWARDED '+item.id+' POWER='+cmd.POWER+' TEMP='+cmd.TEMP);\n};\nconst clearPending = (stage,reason) => {\n  if (s.pending) {emit(s.pending.id,stage,reason);s.pending=null;}\n};\nconst mayForwardOnNow = () => {\n  // These are *commanded* / *reported* states, not physical AC proof.\n  const commandedOnThisBoot = !!(s.lastForwarded && s.lastForwarded.POWER===1\n    && s.lastForwardedAt>=bootAt && s.lastForwardedAt>s.lastOffAt);\n  const espReportsOnNow = liveOnSinceBoot && s.lastDevicePower==='ON'\n    && now-s.lastDeviceStatusAt<DEVICE_STATUS_FRESH_MS;\n  // A recent OFF always overrides a possibly delayed ON report.\n  const offWait = s.lastOffAt ? Math.max(0,MIN_OFF_MS-(now-s.lastOffAt)) : 0;\n  // A restart may have lost the latest OFF if context was not flushed to disk.\n  // We can skip the startup hold only when this boot has evidence of ON.\n  const startWait = !commandedOnThisBoot && !espReportsOnNow\n    ? Math.max(0,RESTART_HOLD_MS-(now-bootAt)) : 0;\n  const waitMs = Math.max(offWait,startWait);\n  return {waitMs,reason:offWait>=startWait && offWait>0?'Minimum OFF time':'Restart safety hold'};\n};\nconst attemptPending = () => {\n  if (!s.pending) return;\n  const item=s.pending;\n  if (now-item.createdAt>=MAX_PENDING_MS) {\n    clearPending('EXPIRED','คำขอ ON หมดอายุ ไม่เปิดแอร์จากคำสั่งเก่า');return;\n  }\n  const gate=mayForwardOnNow();\n  if (gate.waitMs>0) {\n    // Only send a WAIT status when it first changes, not once per second.\n    if (item.lastReason!==gate.reason) {\n      emit(item.id,'WAITING_SAFETY',gate.reason,gate.waitMs);\n      item.lastReason=gate.reason;\n    }\n    return;\n  }\n  s.pending=null;\n  forward(item);\n};\nif (msg.topic===TOP_WEB) {\n  // Old retained web requests must never actuate IR on subscribe/reconnect.\n  if (msg.retain===true) {\n    trace('Rejected retained web command');\n  } else {\n    let req=msg.payload;\n    try {if (typeof req==='string') req=JSON.parse(req);} catch(_) {req=null;}\n    if (req && req.ACTION==='STATUS' && typeof req.REQUEST_ID==='string'\n        && /^[A-Za-z0-9_-]{2,100}$/.test(req.REQUEST_ID)) {\n      // Original firmware STATUS reports self-state and does NOT send IR.\n      outIR.push({topic:TOP_IR,payload:'STATUS',qos:0,retain:false});\n      emit(req.REQUEST_ID,'IR_FORWARDED','STATUS request only: no IR transmission');\n    } else if (!valid(req)) {\n      emit(req && typeof req.REQUEST_ID==='string' ? req.REQUEST_ID : null,\n        'REJECTED','Invalid POWER/TEMP/MODE/FAN/REQUEST_ID');\n      trace('Invalid web command');\n    } else if (req.SENT_AT!==undefined &&\n        (now-req.SENT_AT>MAX_MESSAGE_AGE_MS || req.SENT_AT-now>120000)) {\n      emit(req.REQUEST_ID,'EXPIRED','Old/future-dated browser command rejected');\n    } else {\n      const item={id:req.REQUEST_ID,createdAt:now,\n        cmd:{POWER:req.POWER,TEMP:req.TEMP,MODE:req.MODE,FAN:req.FAN}};\n      // OFF always wins and cancels an ON awaiting compressor protection.\n      if (item.cmd.POWER===0) {\n        clearPending('SUPERSEDED','ยกเลิก ON ที่รออยู่ เพราะผู้ใช้กด OFF');\n        emit(item.id,'ACCEPTED','Manual OFF accepted');\n        forward(item);\n      } else {\n        clearPending('SUPERSEDED','มีคำขอใหม่กว่า');\n        emit(item.id,'ACCEPTED','Manual command accepted');\n        const gate=mayForwardOnNow();\n        if (gate.waitMs>0) {\n          s.pending=item;attemptPending();\n        } else {\n          forward(item);\n        }\n      }\n    }\n  }\n} else if (msg.topic===TOP_ESP) {\n  // Retained status is only a cached device report, never a fresh boot proof.\n  if (!msg.retain) {\n    try {\n      const d=typeof msg.payload==='string'?JSON.parse(msg.payload):msg.payload;\n      if (d && (d.power==='ON'||d.power==='OFF')) {\n        s.lastDevicePower=d.power;s.lastDeviceStatusAt=now;\n        if (d.power==='ON' && !(s.lastOffAt && now-s.lastOffAt<MIN_OFF_MS)) {\n          liveOnSinceBoot=true;\n          context.set('freshOnSinceBoot',true);\n        } else if (d.power==='OFF') {\n          liveOnSinceBoot=false;\n          context.set('freshOnSinceBoot',false);\n        }\n      }\n    } catch(_) { /* LWT / Engine online is not a valid power report */ }\n  }\n} else if (msg.topic==='__tick') {\n  attemptPending();\n}\n// Configure file-backed Node-RED contextStorage for persistence across restarts.\n// Even without persistence, the fresh startup hold protects unknown OFF history.\ncontext.set('manualFastSafetyV3',s);\nreturn [outIR.length?outIR:null,outFeedback.length?outFeedback:null,outDebug.length?outDebug:null];",
+    "outputs": 3,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "// Executed on every Node-RED deploy/restart. A previously unflushed OFF\n// must never make a restart bypass the compressor-protection startup hold.\ncontext.set('fastBootAt', Date.now());\ncontext.set('freshOnSinceBoot', false);",
+    "finalize": "",
+    "libs": [],
+    "x": 545,
+    "y": 190,
+    "wires": [
+      [
+        "68f66d0bc1ee48e0"
+      ],
+      [
+        "742b1ddfb5aa4806"
+      ],
+      [
+        "91a74fb73ac74e1e"
+      ]
+    ]
+  },
+  {
+    "id": "68f66d0bc1ee48e0",
+    "type": "mqtt out",
+    "z": "5010d0e8984a412c",
+    "name": "ESP32 legacy JSON • nonretained • only writer",
+    "topic": "spu/classroom/remote/air",
+    "qos": "0",
+    "retain": "false",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
+    "broker": "a34ac48754d948af",
+    "x": 880,
+    "y": 145,
+    "wires": []
+  },
+  {
+    "id": "742b1ddfb5aa4806",
+    "type": "mqtt out",
+    "z": "5010d0e8984a412c",
+    "name": "Feedback: ACCEPTED/WAITING_SAFETY/FORWARDED",
+    "topic": "spu/classroom/webapp/status",
+    "qos": "0",
+    "retain": "false",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
+    "broker": "a34ac48754d948af",
+    "x": 865,
+    "y": 215,
+    "wires": []
+  },
+  {
+    "id": "91a74fb73ac74e1e",
+    "type": "debug",
+    "z": "5010d0e8984a412c",
+    "name": "Safety trace",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 810,
+    "y": 285,
+    "wires": []
+  },
+  {
+    "id": "020aa2b430cc478a",
+    "type": "inject",
+    "z": "5010d0e8984a412c",
+    "name": "Poll ESP32 STATUS (no IR) every 30s",
+    "props": [
+      {
+        "p": "payload",
+        "v": "STATUS",
+        "vt": "str"
+      }
+    ],
+    "repeat": "30",
+    "crontab": "",
+    "once": true,
+    "onceDelay": "3",
+    "topic": "",
+    "payload": "STATUS",
+    "payloadType": "str",
+    "x": 275,
+    "y": 355,
+    "wires": [
+      [
+        "68f66d0bc1ee48e0"
+      ]
+    ]
+  }
+]

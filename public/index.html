@@ -1,0 +1,1195 @@
+<!DOCTYPE html>
+<html lang="th">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Classroom | ควบคุมแอร์ ESP32</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- MQTT.js (ทำงานอยู่เบื้องหลัง ไม่แสดงศัพท์เทคนิคบนหน้าจอ) -->
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <!-- Chart.js สำหรับกราฟแนวโน้มอุณหภูมิที่อ่านง่าย -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- โหลด ONNX Runtime และ Silero VAD จาก Local Server (ไม่ติด CORS / ไม่ขึ้น 404) -->
+    <script src="/ort/ort.js"></script>
+    <script src="/vad-web/bundle.min.js"></script>
+    <script src="/js/voice-feedback.js"></script>
+    <script src="/js/voice-audio.js"></script>
+    <script src="/js/voice-controller.js"></script>
+    <script src="/js/voice-handsfree.js"></script>
+    <!-- Google Fonts: Prompt -->
+    <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Prompt', sans-serif;
+            background-color: #F4F7FB;
+            color: #1E293B;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        /* แอนิเมชันเปลี่ยนสีพื้นหลังของการ์ดรีโมทแอร์อย่างนุ่มนวล */
+        .thermostat-card {
+            transition: background 0.6s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.6s ease;
+        }
+
+        /* สถานะสีของการ์ดแอร์ตามการทำงานจริง */
+        .theme-cool-strong {
+            background: linear-gradient(135deg, #0284C7 0%, #2563EB 55%, #4F46E5 100%);
+            box-shadow: 0 20px 40px -15px rgba(37, 99, 235, 0.45);
+        }
+
+        .theme-cool-normal {
+            background: linear-gradient(135deg, #0EA5E9 0%, #0284C7 55%, #0369A1 100%);
+            box-shadow: 0 20px 40px -15px rgba(14, 165, 233, 0.4);
+        }
+
+        .theme-cool-eco {
+            background: linear-gradient(135deg, #0D9488 0%, #0891B2 55%, #0284C7 100%);
+            box-shadow: 0 20px 40px -15px rgba(13, 148, 136, 0.38);
+        }
+
+        .theme-off {
+            background: linear-gradient(135deg, #475569 0%, #334155 60%, #1E293B 100%);
+            box-shadow: 0 20px 40px -15px rgba(51, 65, 85, 0.35);
+        }
+
+        /* ปุ่มกดนุ่มนวลแบบแอป Smart Home */
+        .btn-press {
+            transition: transform 0.15s ease, background-color 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .btn-press:active {
+            transform: scale(0.95);
+        }
+
+        /* แอนิเมชันกะพริบนุ่มๆ ขณะรอแอร์ตอบรับ */
+        @keyframes softPulse {
+
+            0%,
+            100% {
+                opacity: 1;
+                transform: scale(1);
+            }
+
+            50% {
+                opacity: 0.55;
+                transform: scale(0.98);
+            }
+        }
+
+        .animate-soft-pulse {
+            animation: softPulse 1.8s infinite ease-in-out;
+        }
+
+        .choice-btn {
+            background: #F1F5F9;
+            color: #475569;
+            padding: .65rem .3rem;
+            border-radius: .85rem;
+            font-size: .75rem;
+            font-weight: 600;
+            border: 1px solid #E2E8F0;
+            transition: background .18s, color .18s;
+        }
+
+        .choice-btn.active {
+            color: #0369A1;
+            background: #E0F2FE;
+            border-color: #38BDF8;
+        }
+
+        .choice-btn:disabled {
+            opacity: .4;
+            cursor: not-allowed;
+        }
+
+        .setting-input {
+            display: block;
+            width: 100%;
+            border: 1px solid #CBD5E1;
+            background: #F8FAFC;
+            padding: .65rem .8rem;
+            border-radius: .8rem;
+            color: #334155;
+            font-weight: 400;
+            font-size: .82rem;
+            outline: 0;
+        }
+
+        .setting-input:focus {
+            border-color: #0284C7;
+            box-shadow: 0 0 0 3px rgba(14, 165, 233, .12);
+        }
+
+        .btn-press:disabled {
+            opacity: .48;
+            cursor: not-allowed;
+            transform: none !important
+        }
+
+        @media (prefers-reduced-motion:reduce) {
+            .animate-soft-pulse {
+                animation: none !important
+            }
+
+            .thermostat-card,
+            .btn-press {
+                transition: none !important
+            }
+        }
+    </style>
+</head>
+
+<body class="min-h-screen py-6 px-4 sm:px-6 lg:px-8">
+
+    <div class="max-w-6xl mx-auto space-y-6">
+
+        <!-- ================================================================= -->
+        <!-- 1. แถบส่วนหัว (ชื่อห้องเรียน, เวลาปัจจุบัน, สถานะความพร้อมของระบบ)       -->
+        <!-- ================================================================= -->
+        <header
+            class="bg-white rounded-3xl p-5 sm:p-6 shadow-sm border border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div class="flex items-center gap-4">
+                <div class="w-12 h-12 rounded-2xl bg-sky-50 text-sky-600 flex items-center justify-center shrink-0">
+                    <!-- ไอคอนอาคาร/ห้องเรียน -->
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                            d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4">
+                        </path>
+                    </svg>
+                </div>
+                <div>
+                    <h1 id="ui-room-name" class="text-xl sm:text-2xl font-bold text-slate-800 tracking-tight">
+                        ห้องเรียน 5-402 • อาคารเรียนรวม
+                    </h1>
+                    <p id="ui-datetime" class="text-sm text-slate-500 mt-0.5">
+                        กำลังโหลดเวลาปัจจุบัน...
+                    </p>
+                </div>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-2.5">
+                <!-- ปุ่มเปิดโหมดจำลองทดสอบ (ช่วยให้ทดสอบหน้าเว็บได้ทันทีแม้ยังไม่ได้ต่อบอร์ดจริง) -->
+                <button id="btn-demo-toggle" onclick="toggleDemoMode()"
+                    class="btn-press text-xs font-medium px-3.5 py-2 rounded-full border border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100 flex items-center gap-1.5"
+                    title="ใช้จำลองการทำงานของแอร์และเซนเซอร์เพื่อทดสอบหน้าจอ">
+                    <span id="demo-dot" class="w-2 h-2 rounded-full bg-slate-400"></span>
+                    <span id="demo-text">โหมดจำลองทดสอบ: ปิด</span>
+                </button>
+
+                <!-- ปุ่มเปิดโหมด Hands-Free เรียกชื่อ "Engi" โดยไม่ต้องกดปุ่ม -->
+                <button id="btn-wake-toggle" type="button" onclick="toggleAlwaysOnWakeMode()"
+                    class="btn-press text-xs font-semibold px-3.5 py-2 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 flex items-center gap-1.5"
+                    title="เปิดฟังคำสั่งแอร์ต่อเนื่องโดยไม่เรียกชื่อ โมเดลในเครื่องยังไม่รองรับ Engi">
+                    <span id="wake-dot" class="w-2 h-2 rounded-full bg-slate-400"></span>
+                    <span id="wake-btn-text">ฟังคำสั่งต่อเนื่อง: ปิด</span>
+                </button>
+
+                <!-- ปุ่มสั่งงานด้วยเสียงแบบกดเพื่อพูดทันที -->
+                <button id="btn-voice-cmd" type="button" onclick="handleVoiceButtonClick()"
+                    class="btn-press text-xs font-semibold px-4 py-2 rounded-full border border-indigo-200 bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm flex items-center gap-2">
+                    <span id="voice-dot" class="w-2 h-2 rounded-full bg-white"></span>
+                    <span id="voice-btn-text">🎤 กดเพื่อพูด</span>
+                </button>
+
+                <button id="btn-settings" type="button" onclick="toggleSettings()"
+                    class="btn-press text-xs font-medium px-3.5 py-2 rounded-full border border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100 flex items-center gap-1.5"
+                    aria-expanded="false" aria-controls="settings-panel">⚙ ตั้งค่าการเชื่อมต่อ</button>
+
+                <!-- ป้ายสถานะระบบแบบเข้าใจง่ายสำหรับอาจารย์/เจ้าหน้าที่ -->
+                <div id="conn-pill"
+                    class="flex items-center gap-2 px-4 py-2 rounded-full bg-amber-50 border border-amber-200/80 text-amber-700 text-xs sm:text-sm font-medium">
+                    <span id="conn-dot" class="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse"></span>
+                    <span id="conn-text">กำลังเชื่อมต่อระบบ...</span>
+                </div>
+            </div>
+        </header>
+
+        <section id="settings-panel" class="hidden bg-white rounded-3xl p-5 sm:p-6 border border-slate-200 shadow-sm"
+            aria-label="ตั้งค่าการเชื่อมต่อ MQTT">
+            <div class="flex items-center justify-between gap-3 mb-3">
+                <h2 class="font-bold text-base text-slate-800">ตั้งค่าการเชื่อมต่อ MQTT</h2><button type="button"
+                    onclick="toggleSettings()" aria-label="ปิดตั้งค่า" class="text-slate-500 text-xl px-2">×</button>
+            </div>
+            <p class="text-xs text-slate-500 mb-4">เว็บใช้ WebSocket Secure (WSS) แต่ ESP32 ใช้ MQTT TCP พอร์ต 1883
+                ได้ตามเดิม หากใช้ Broker เดียวกันและ Topic ตรงกัน</p>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <label class="text-xs font-medium text-slate-600">MQTT WebSocket URL<input id="setting-broker"
+                        type="url" autocomplete="off" spellcheck="false" class="setting-input mt-1"
+                        placeholder="wss://broker.emqx.io:8084/mqtt"></label>
+                <label class="text-xs font-medium text-slate-600">Username (ถ้ามี)<input id="setting-user" type="text"
+                        autocomplete="username" class="setting-input mt-1" placeholder="เว้นว่างได้"></label>
+                <label class="text-xs font-medium text-slate-600">Password (ถ้ามี)<input id="setting-pass"
+                        type="password" autocomplete="current-password" class="setting-input mt-1"
+                        placeholder="ไม่บันทึกรหัสผ่านลงเครื่อง"></label>
+                <label class="text-xs font-medium text-slate-600">Topic คำสั่ง MANUAL ไป ESP32 โดยตรง<input
+                        id="setting-command" type="text" class="setting-input mt-1" spellcheck="false"></label>
+                <label class="text-xs font-medium text-slate-600">Topic สถานะ ESP32<input id="setting-status"
+                        type="text" class="setting-input mt-1" spellcheck="false"></label>
+                <label class="text-xs font-medium text-slate-600">Topic อุณหภูมิ DHT22<input id="setting-temp"
+                        type="text" class="setting-input mt-1" spellcheck="false"></label>
+                <label class="text-xs font-medium text-slate-600">Topic ความชื้น DHT22<input id="setting-humid"
+                        type="text" class="setting-input mt-1" spellcheck="false"></label>
+                <label class="text-xs font-medium text-slate-600">Topic จำนวนคน CiRA<input id="setting-people"
+                        type="text" class="setting-input mt-1" spellcheck="false"></label>
+            </div>
+            <div class="flex flex-wrap items-center gap-2 mt-4">
+                <button type="button" onclick="applySettings()"
+                    class="btn-press bg-sky-600 text-white px-5 py-2.5 rounded-xl font-semibold text-sm hover:bg-sky-700">บันทึกและเชื่อมต่อใหม่</button>
+                <button type="button" onclick="resetSettings()"
+                    class="btn-press bg-slate-100 text-slate-700 px-4 py-2.5 rounded-xl text-sm">คืนค่า Topic ของโค้ด
+                    ESP32</button>
+            </div>
+            <p class="mt-4 text-xs text-sky-700 bg-sky-50 rounded-xl px-3 py-2">MANUAL ส่งคำสั่ง MQTT ไป ESP32
+                โดยตรงทันที ไม่ต้องเปิด Node-RED • AUTO ยังไม่เปิดใช้จนกว่าจะเชื่อมกล้องและระบบอัตโนมัติ</p>
+            <p class="mt-4 text-xs text-amber-700 bg-amber-50 rounded-xl px-3 py-2">ข้อควรระวัง: broker.emqx.io เป็น
+                Public Broker สำหรับทดสอบเท่านั้น ผู้ใช้อื่นอาจเห็นหรือส่งคำสั่งไปยัง Topic เดียวกันได้
+                ไม่ควรใช้กับห้องเรียนจริง</p>
+        </section>
+        <div id="notice-banner" role="status" aria-live="polite" class="hidden rounded-2xl p-3 text-sm border"></div>
+        <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 px-1">
+            <span id="device-line">ESP32: รอสถานะ • ข้อมูลจะไม่แสดงเป็นค่าจริงจนกว่าอุปกรณ์ตอบกลับ</span>
+            <button type="button" onclick="requestDeviceStatus(true)" class="text-sky-700 font-medium hover:underline">↻
+                ตรวจสอบสถานะ ESP32</button>
+        </div>
+
+        <!-- ================================================================= -->
+        <!-- 2. ส่วนหลัก: การ์ดรีโมทแอร์อัจฉริยะ (ซ้าย) + โหมดและสภาพห้อง (ขวา)     -->
+        <!-- ================================================================= -->
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+
+            <!-- ------------------------------------------------------------- -->
+            <!-- คอลัมน์ซ้าย (5 ส่วน): การ์ดควบคุมแอร์หลัก (Hero Smart Thermostat) -->
+            <!-- ------------------------------------------------------------- -->
+            <div class="lg:col-span-5">
+                <div id="thermostat-card"
+                    class="thermostat-card theme-cool-normal rounded-3xl p-6 sm:p-8 text-white flex flex-col justify-between min-h-[460px] relative overflow-hidden">
+
+                    <!-- ลวดลายวงกลมตกแต่งพื้นหลังเบาๆ -->
+                    <div
+                        class="absolute -top-20 -right-20 w-64 h-64 rounded-full bg-white/10 pointer-events-none blur-xl">
+                    </div>
+                    <div
+                        class="absolute -bottom-24 -left-20 w-64 h-64 rounded-full bg-black/10 pointer-events-none blur-xl">
+                    </div>
+
+                    <!-- ส่วนบนของการ์ด: ป้ายสถานะการทำงานจริง (Closed-Loop Feedback) + ปุ่มเปิด/ปิด -->
+                    <div class="relative z-10 flex items-center justify-between gap-3">
+                        <div id="verify-pill"
+                            class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-white/20 backdrop-blur-md text-xs sm:text-sm font-medium">
+                            <span id="verify-icon" class="w-2 h-2 rounded-full bg-emerald-300"></span>
+                            <span id="verify-message">กำลังตรวจสอบสถานะ ESP32...</span>
+                        </div>
+
+                        <button id="btn-power" onclick="handlePowerToggle()"
+                            class="btn-press px-4 py-2 rounded-full bg-white text-slate-800 hover:bg-slate-100 font-semibold text-xs sm:text-sm shadow-md flex items-center gap-1.5 shrink-0">
+                            <svg class="w-4 h-4 text-rose-500" fill="none" stroke="currentColor" stroke-width="2.5"
+                                viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                    d="M5.636 5.636a9 9 0 1012.728 0M12 3v9"></path>
+                            </svg>
+                            <span id="btn-power-text">ปิดแอร์</span>
+                        </button>
+                    </div>
+
+                    <!-- ส่วนกลางของการ์ด: ตัวเลขอุณหภูมิขนาดใหญ่ และปุ่ม (-) (+) -->
+                    <div class="relative z-10 my-8 text-center">
+                        <p id="thermostat-subtitle" class="text-white/80 text-sm font-medium mb-2">
+                            อุณหภูมิที่ตั้งไว้
+                        </p>
+
+                        <div class="flex items-center justify-center gap-6 sm:gap-8">
+                            <!-- ปุ่มลดอุณหภูมิ (-) -->
+                            <button id="btn-temp-down" onclick="adjustTemperature(-1)" aria-label="ลดอุณหภูมิ"
+                                class="btn-press w-14 h-14 sm:w-16 sm:h-16 rounded-full bg-white/20 hover:bg-white/30 disabled:opacity-30 disabled:pointer-events-none backdrop-blur-md flex items-center justify-center text-3xl font-light shadow-inner">
+                                −
+                            </button>
+
+                            <!-- ตัวเลขอุณหภูมิ -->
+                            <div class="min-w-[140px] text-center select-none">
+                                <div class="flex items-start justify-center">
+                                    <span id="ui-target-temp"
+                                        class="text-6xl sm:text-7xl font-bold tracking-tight">—</span>
+                                    <span id="ui-target-unit"
+                                        class="text-2xl sm:text-3xl font-medium mt-2 ml-1">°C</span>
+                                </div>
+                                <p id="ui-cooling-desc" class="text-xs sm:text-sm text-white/85 mt-1 font-medium">
+                                    เย็นสบายมาตรฐาน • ประหยัดพลังงาน
+                                </p>
+                            </div>
+
+                            <!-- ปุ่มเพิ่มอุณหภูมิ (+) -->
+                            <button id="btn-temp-up" onclick="adjustTemperature(1)" aria-label="เพิ่มอุณหภูมิ"
+                                class="btn-press w-14 h-14 sm:w-16 sm:h-16 rounded-full bg-white/20 hover:bg-white/30 disabled:opacity-30 disabled:pointer-events-none backdrop-blur-md flex items-center justify-center text-3xl font-light shadow-inner">
+                                +
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- ส่วนล่างของการ์ด: ปุ่มลัดเลือกอุณหภูมิเร็วสำหรับอาจารย์ -->
+                    <div class="relative z-10">
+                        <p class="text-xs text-white/75 mb-2.5 text-center">
+                            อุณหภูมิลัด • ใช้ปุ่ม − / + ปรับได้ 21–27°C
+                        </p>
+                        <div class="grid grid-cols-3 gap-2">
+                            <button onclick="selectQuickTemp(23)" id="preset-23"
+                                class="btn-press py-2.5 px-2 rounded-2xl bg-white/15 hover:bg-white/25 backdrop-blur-md text-center transition">
+                                <div class="text-sm sm:text-base font-bold">23°C</div>
+                                <div class="text-[11px] text-white/80">เย็นฉ่ำ (คนเยอะ)</div>
+                            </button>
+                            <button onclick="selectQuickTemp(24)" id="preset-24"
+                                class="btn-press py-2.5 px-2 rounded-2xl bg-white text-sky-900 shadow-sm text-center transition">
+                                <div class="text-sm sm:text-base font-bold">24°C</div>
+                                <div class="text-[11px] opacity-80">มาตรฐาน</div>
+                            </button>
+                            <button onclick="selectQuickTemp(25)" id="preset-25"
+                                class="btn-press py-2.5 px-2 rounded-2xl bg-white/15 hover:bg-white/25 backdrop-blur-md text-center transition">
+                                <div class="text-sm sm:text-base font-bold">25°C</div>
+                                <div class="text-[11px] text-white/80">ประหยัดไฟ</div>
+                            </button>
+                        </div>
+
+                        <!-- ปุ่มตรวจสอบสถานะ ไม่ส่ง IR ซ้ำ -->
+                        <div id="retry-action-box"
+                            class="hidden mt-3 pt-3 border-t border-white/20 flex items-center justify-between gap-2">
+                            <span class="text-xs text-amber-200">ยังไม่ได้รับการตอบกลับจาก ESP32 —
+                                ขออ่านสถานะใหม่ได้โดยไม่ยิง IR ซ้ำ</span>
+                            <button onclick="requestDeviceStatus(true)"
+                                class="btn-press px-3 py-1.5 rounded-xl bg-amber-400 text-slate-900 font-semibold text-xs">
+                                ตรวจสถานะอีกครั้ง
+                            </button>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+
+            <!-- ------------------------------------------------------------- -->
+            <!-- คอลัมน์ขวา (7 ส่วน): การเลือกโหมด + สภาพแวดล้อมในห้องเรียนจริง     -->
+            <!-- ------------------------------------------------------------- -->
+            <div class="lg:col-span-7 flex flex-col justify-between gap-6">
+
+                <!-- กล่องเลือกโหมดการทำงาน (เข้าใจง่าย ไม่ใช้ศัพท์เทคนิค) -->
+                <div class="bg-white rounded-3xl p-6 shadow-sm border border-slate-100">
+                    <div class="flex items-center justify-between mb-4">
+                        <div>
+                            <h2 class="text-base sm:text-lg font-bold text-slate-800">รูปแบบการทำงานของเครื่องปรับอากาศ
+                            </h2>
+                            <p class="text-xs sm:text-sm text-slate-500">MANUAL ควบคุมตรงทันที • AUTO
+                                รอเปิดใช้งานกล้องและ Node-RED</p>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                        <!-- โหมดอัจฉริยะ (AUTO) -->
+                        <button id="card-mode-auto" onclick="switchMode('AUTO')"
+                            class="btn-press text-left p-4 rounded-2xl border-2 border-slate-200 bg-slate-50/80 opacity-75 transition flex items-start gap-3.5">
+                            <div id="icon-mode-auto"
+                                class="w-11 h-11 rounded-xl bg-sky-500 text-white flex items-center justify-center shrink-0 mt-0.5">
+                                <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2"
+                                    viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z">
+                                    </path>
+                                </svg>
+                            </div>
+                            <div>
+                                <div class="flex items-center gap-2">
+                                    <span class="font-bold text-slate-800 text-sm sm:text-base">โหมดอัตโนมัติ
+                                        (AUTO)</span>
+                                    <span id="tag-mode-auto"
+                                        class="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-slate-200 text-slate-600">ยังไม่เปิดใช้</span>
+                                </div>
+                                <p class="text-xs text-slate-600 mt-1 leading-relaxed">
+                                    ยังไม่เปิดใช้ • จะเปิดเมื่อ CiRA CORE และ Node-RED พร้อมเท่านั้น
+                                </p>
+                            </div>
+                        </button>
+
+                        <!-- โหมดปรับด้วยตัวเอง (MANUAL) -->
+                        <button id="card-mode-manual" onclick="switchMode('MANUAL')"
+                            class="btn-press text-left p-4 rounded-2xl border-2 border-sky-500 bg-sky-50/60 hover:bg-sky-50 transition flex items-start gap-3.5">
+                            <div id="icon-mode-manual"
+                                class="w-11 h-11 rounded-xl bg-slate-100 text-slate-600 flex items-center justify-center shrink-0 mt-0.5">
+                                <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2"
+                                    viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                        d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4">
+                                    </path>
+                                </svg>
+                            </div>
+                            <div>
+                                <div class="flex items-center gap-2">
+                                    <span class="font-bold text-slate-800 text-sm sm:text-base">ปรับด้วยตัวเอง</span>
+                                    <span id="tag-mode-manual"
+                                        class="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-sky-100 text-sky-800">กำลังใช้งาน</span>
+                                </div>
+                                <p class="text-xs text-slate-600 mt-1 leading-relaxed">
+                                    ส่ง MQTT ตรงเข้า ESP32 ทุกครั้งที่กด • ไม่หน่วง ไม่รอ ACK
+                                </p>
+                            </div>
+                        </button>
+                    </div>
+                    <div class="mt-5 pt-4 border-t border-slate-100 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div>
+                            <label class="text-xs font-semibold text-slate-600 block mb-2">โหมดของแอร์ (IR)</label>
+                            <div class="grid grid-cols-3 gap-2" id="mode-buttons">
+                                <button type="button" onclick="chooseAcMode(0)" data-ac-mode="0"
+                                    class="choice-btn">COOL</button>
+                                <button type="button" onclick="chooseAcMode(1)" data-ac-mode="1"
+                                    class="choice-btn">DRY</button>
+                                <button type="button" onclick="chooseAcMode(2)" data-ac-mode="2"
+                                    class="choice-btn">FAN</button>
+                            </div>
+                        </div>
+                        <div>
+                            <label class="text-xs font-semibold text-slate-600 block mb-2">ความแรงพัดลม (เมื่อใช้
+                                COOL)</label>
+                            <div class="grid grid-cols-4 gap-1.5" id="fan-buttons">
+                                <button type="button" onclick="chooseAcFan(0)" data-ac-fan="0"
+                                    class="choice-btn">AUTO</button>
+                                <button type="button" onclick="chooseAcFan(1)" data-ac-fan="1"
+                                    class="choice-btn">LOW</button>
+                                <button type="button" onclick="chooseAcFan(2)" data-ac-fan="2"
+                                    class="choice-btn">MED</button>
+                                <button type="button" onclick="chooseAcFan(3)" data-ac-fan="3"
+                                    class="choice-btn">HIGH</button>
+                            </div>
+                        </div>
+                    </div>
+                    <p id="last-command-info" class="mt-4 text-xs text-slate-400">ยังไม่ได้รับสถานะจาก ESP32</p>
+                </div>
+
+                <!-- การ์ดสภาพอากาศและจำนวนผู้เรียนในห้อง (3 การ์ดที่เป็นมิตรกับผู้ใช้ทั่วไป) -->
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+
+                    <!-- 1. อุณหภูมิห้องจริง -->
+                    <div
+                        class="bg-white rounded-3xl p-5 shadow-sm border border-slate-100 flex flex-col justify-between">
+                        <div class="flex items-center justify-between">
+                            <span class="text-xs sm:text-sm font-medium text-slate-500">อุณหภูมิในห้องตอนนี้</span>
+                            <div class="w-9 h-9 rounded-xl bg-sky-50 text-sky-600 flex items-center justify-center">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2"
+                                    viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                        d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z">
+                                    </path>
+                                </svg>
+                            </div>
+                        </div>
+                        <div class="my-3 flex items-baseline gap-1.5">
+                            <span id="val-room-temp" class="text-3xl sm:text-4xl font-bold text-slate-800">—</span>
+                            <span class="text-base font-medium text-slate-400">°C</span>
+                        </div>
+                        <div>
+                            <span id="badge-room-temp"
+                                class="inline-block text-xs font-medium px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700">
+                                เย็นสบายกำลังดี
+                            </span>
+                        </div>
+                    </div>
+
+                    <!-- 2. ความชื้นและความสบายตัว -->
+                    <div
+                        class="bg-white rounded-3xl p-5 shadow-sm border border-slate-100 flex flex-col justify-between">
+                        <div class="flex items-center justify-between">
+                            <span class="text-xs sm:text-sm font-medium text-slate-500">ความชื้นในอากาศ</span>
+                            <div class="w-9 h-9 rounded-xl bg-teal-50 text-teal-600 flex items-center justify-center">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2"
+                                    viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                        d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z">
+                                    </path>
+                                </svg>
+                            </div>
+                        </div>
+                        <div class="my-3 flex items-baseline gap-1.5">
+                            <span id="val-room-humid" class="text-3xl sm:text-4xl font-bold text-slate-800">—</span>
+                            <span class="text-base font-medium text-slate-400">%</span>
+                        </div>
+                        <p id="desc-room-humid" class="text-xs text-slate-500 leading-snug">
+                            อากาศกำลังสบาย ไม่เหนียวตัว
+                        </p>
+                    </div>
+
+                    <!-- 3. จำนวนผู้เรียนในห้อง -->
+                    <div
+                        class="bg-white rounded-3xl p-5 shadow-sm border border-slate-100 flex flex-col justify-between">
+                        <div class="flex items-center justify-between">
+                            <span class="text-xs sm:text-sm font-medium text-slate-500">ผู้เรียนในห้องตอนนี้</span>
+                            <div
+                                class="w-9 h-9 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2"
+                                    viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                        d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z">
+                                    </path>
+                                </svg>
+                            </div>
+                        </div>
+                        <div class="my-3 flex items-baseline gap-1.5">
+                            <span id="val-room-people" class="text-3xl sm:text-4xl font-bold text-slate-800">—</span>
+                            <span class="text-base font-medium text-slate-400">คน</span>
+                        </div>
+                        <p id="desc-room-people" class="text-xs text-slate-500 leading-snug">
+                            มีผู้เรียนปกติ แนะนำอุณหภูมิ 24°C
+                        </p>
+                    </div>
+
+                </div>
+
+            </div>
+        </div>
+
+        <!-- ================================================================= -->
+        <!-- 3. แถบจำลองสถานการณ์ด่วน (จะแสดงเฉพาะตอนกดเปิด "โหมดจำลองทดสอบ")    -->
+        <!-- ================================================================= -->
+        <div id="demo-toolbar"
+            class="hidden bg-indigo-950 text-white rounded-3xl p-5 shadow-md flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div>
+                <div class="flex items-center gap-2">
+                    <span
+                        class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-indigo-500 text-white">โหมดจำลองการทดสอบ</span>
+                    <span class="text-sm font-medium text-indigo-100">จำลองหน้าจอเท่านั้น • ไม่ส่ง MQTT หรือ IR
+                        จริง</span>
+                </div>
+                <p class="text-xs text-indigo-300 mt-1">
+                    ปิดการเชื่อมต่อ MQTT ระหว่างโหมดจำลอง และจะเชื่อมต่อใหม่เมื่อออกจากโหมดนี้
+                </p>
+            </div>
+            <div class="flex flex-wrap gap-2">
+                <button onclick="window.devTools.simulateSensor(24.6, 54, 6)"
+                    class="btn-press text-xs bg-white/10 hover:bg-white/20 px-3 py-2 rounded-xl">
+                    จำลอง: คนน้อย (6 คน)
+                </button>
+                <button onclick="window.devTools.simulateSensor(26.8, 62, 22)"
+                    class="btn-press text-xs bg-white/10 hover:bg-white/20 px-3 py-2 rounded-xl">
+                    จำลอง: คนเต็มห้อง (22 คน)
+                </button>
+                <button onclick="window.devTools.simulateSensor(24.2, 50, 0)"
+                    class="btn-press text-xs bg-white/10 hover:bg-white/20 px-3 py-2 rounded-xl">
+                    จำลอง: ไม่มีคน (0 คน)
+                </button>
+                <button onclick="window.devTools.simulateVerify('ERROR_UNRESPONSIVE')"
+                    class="btn-press text-xs bg-rose-500/80 hover:bg-rose-500 px-3 py-2 rounded-xl">
+                    จำลอง: ไม่ตอบกลับ
+                </button>
+            </div>
+        </div>
+
+        <!-- ================================================================= -->
+        <!-- 4. กราฟแนวโน้มอุณหภูมิในห้องเรียน (สะอาดตา อ่านง่ายสำหรับคนทั่วไป)      -->
+        <!-- ================================================================= -->
+        <section class="bg-white rounded-3xl p-6 shadow-sm border border-slate-100">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
+                <div>
+                    <h2 class="text-base sm:text-lg font-bold text-slate-800">แนวโน้มอุณหภูมิภายในห้องเรียน</h2>
+                    <p class="text-xs sm:text-sm text-slate-500">
+                        แสดงการเปลี่ยนแปลงของอุณหภูมิห้องเปรียบเทียบกับอุณหภูมิแอร์ที่ตั้งไว้</p>
+                </div>
+                <div class="flex items-center gap-4 text-xs text-slate-500">
+                    <span class="flex items-center gap-1.5">
+                        <span class="w-3 h-3 rounded-full bg-sky-500 inline-block"></span> อุณหภูมิห้องจริง (°C)
+                    </span>
+                    <span class="flex items-center gap-1.5">
+                        <span class="w-3 h-0.5 bg-amber-500 inline-block"></span> อุณหภูมิที่ตั้งไว้ (°C)
+                    </span>
+                </div>
+            </div>
+            <div class="relative h-60 w-full">
+                <canvas id="tempChart"></canvas>
+            </div>
+        </section>
+        <section class="bg-white rounded-3xl p-5 sm:p-6 shadow-sm border border-slate-100">
+            <div class="flex items-center justify-between gap-3 mb-3">
+                <div>
+                    <h2 class="font-bold text-slate-800 text-base">บันทึกการทำงาน</h2>
+                    <p class="text-xs text-slate-500 mt-1">ดูว่าคำสั่งถูกส่งแล้วหรือ ESP32 ตอบกลับเมื่อใด
+                        (ไม่ใช่หลักฐานการทำงานจริงของแอร์)</p>
+                </div><button type="button" onclick="clearEventLog()"
+                    class="text-xs text-slate-500 hover:text-sky-700 shrink-0">ล้างบันทึก</button>
+            </div>
+            <div id="event-log" class="space-y-2 text-xs text-slate-600" aria-live="polite">
+                <p class="text-slate-400">ยังไม่มีเหตุการณ์</p>
+            </div>
+        </section>
+
+    </div>
+
+    <!-- ========================================================================= -->
+    <!-- ส่วนตั้งค่าระบบและโค้ดการทำงาน (สำหรับผู้พัฒนา: แก้ไขค่าทั้งหมดได้ที่ CONFIG ด้านล่าง) -->
+    <!-- ========================================================================= -->
+    <script>
+        'use strict';
+        /*
+         * Smart Classroom Web Dashboard — MANUAL DIRECT (camera/AUTO not active).
+         * Manual commands publish immediately to the existing ESP32 MQTT command topic.
+         * No browser cooldown, no Node-RED/ACK dependency, no automatic resend on reconnect.
+         * AUTO card intentionally stays unavailable until camera/Node-RED integration is ready.
+         * ESP32 status is self-reported last command, not proof of physical air-conditioner action.
+         * WARNING: direct control has no compressor safety lockout; test with air conditioner OFF
+         * or IR disconnected first and follow the air conditioner's minimum restart guidance.
+         */
+        const DEFAULTS = Object.freeze({
+            mqttUrl: 'wss://broker.emqx.io:8084/mqtt',
+            username: '',
+            command: 'spu/classroom/remote/air',
+            status: 'spu/classroom/status',
+            temp: 'spu/classroom/middle/temp',
+            humid: 'spu/classroom/middle/humid',
+            people: 'spu/classroom/cira'
+        });
+        const ROOM_NAME = 'ห้องเรียน 5-402 • อาคารเรียนรวม';
+        const MIN_TEMP = 21;
+        const MAX_TEMP = 27;
+        const ACK_TIMEOUT_MS = 10000; // display-only timeout: never blocks the next command
+        const DEVICE_STALE_MS = 75000;
+        const SENSOR_STALE_MS = 30000;
+        const MODE_NAMES = ['COOL', 'DRY', 'FAN'];
+        const FAN_NAMES = ['AUTO', 'LOW', 'MED', 'HIGH'];
+        const $ = id => document.getElementById(id);
+        const state = {
+            mqttConnected: false, deviceOnline: false, demo: false,
+            ac: { power: null, temp: 24, mode: 0, fan: 3 },
+            roomTemp: null, humid: null, people: null,
+            sensorAt: { temp: 0, humid: 0, people: 0 }, lastStatusAt: 0,
+            statusQuality: 'unknown',
+            verifyState: 'unknown', pending: null,
+            requested: null, lastPollAt: 0, requestCount: 0,
+            commandDetail: '', events: [], notice: null,
+            chartLastAt: 0
+        };
+        let settings = { ...DEFAULTS };
+        let mqttClient = null;
+        let chart = null;
+        let noticeTimer = null;
+        let reconnectProbeTimer = null;
+
+        function logEvent(kind, msg) {
+            const entry = { at: new Date(), kind, msg };
+            state.events.unshift(entry);
+            state.events.splice(12);
+            const parent = $('event-log');
+            if (!parent) return;
+            parent.textContent = '';
+            for (const x of state.events) {
+                const row = document.createElement('div');
+                row.className = 'flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-3 py-1.5 border-b border-slate-100 last:border-0';
+                const time = document.createElement('span');
+                time.className = 'text-slate-400 tabular-nums shrink-0';
+                time.textContent = x.at.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                const label = document.createElement('span');
+                label.className = x.kind === 'error' ? 'text-rose-700' : x.kind === 'warning' ? 'text-amber-700' : 'text-slate-600';
+                label.textContent = x.msg;
+                row.append(time, label);
+                parent.append(row);
+            }
+        }
+        function clearEventLog() {
+            state.events = [];
+            $('event-log').textContent = 'ยังไม่มีเหตุการณ์';
+        }
+        function notice(message, kind = 'info', timeout = 7500) {
+            const node = $('notice-banner');
+            if (noticeTimer) clearTimeout(noticeTimer);
+            node.textContent = message;
+            node.className = `rounded-2xl p-3 text-sm border ${kind === 'error' ? 'bg-rose-50 border-rose-200 text-rose-800' : kind === 'warning' ? 'bg-amber-50 border-amber-200 text-amber-800' : 'bg-sky-50 border-sky-200 text-sky-800'}`;
+            if (timeout) noticeTimer = setTimeout(() => { node.classList.add('hidden') }, timeout);
+        }
+        function parseValue(raw) { try { return JSON.parse(raw) } catch { return raw } }
+        function numberInRange(n, lo, hi) { return typeof n === 'number' && Number.isFinite(n) && n >= lo && n <= hi }
+        function readableAge(ms) {
+            if (!ms) return 'ยังไม่มีข้อมูล';
+            const sec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+            return sec < 60 ? `${sec} วินาทีที่แล้ว` : `${Math.floor(sec / 60)} นาทีที่แล้ว`;
+        }
+        function isFreshSensor(which) { return !!state.sensorAt[which] && (state.demo || Date.now() - state.sensorAt[which] < SENSOR_STALE_MS) }
+        // Direct manual control needs only an active MQTT socket. ESP32 state may be unknown.
+        function commandAllowed() { return state.demo || state.mqttConnected }
+        function currentDesired() { return state.requested || state.ac }
+
+        function loadSettings() {
+            try {
+                const saved = JSON.parse(localStorage.getItem('smartClassroomMqttSettingsV3Direct') || '{}');
+                for (const k of Object.keys(DEFAULTS)) {
+                    if (k !== 'username' && typeof saved[k] === 'string' && saved[k].trim()) settings[k] = saved[k];
+                }
+            } catch (_) { /* private browsing / file origin may disable storage */ }
+            settingsToForm();
+        }
+        function settingsToForm() {
+            const names = ['mqttUrl', 'username', 'command', 'status', 'temp', 'humid', 'people'];
+            const ids = ['setting-broker', 'setting-user', 'setting-command', 'setting-status', 'setting-temp', 'setting-humid', 'setting-people'];
+            names.forEach((key, i) => { $(ids[i]).value = settings[key] || '' });
+            $('setting-pass').value = '';
+        }
+        function toggleSettings() {
+            const panel = $('settings-panel');
+            panel.classList.toggle('hidden');
+            $('btn-settings').setAttribute('aria-expanded', String(!panel.classList.contains('hidden')));
+        }
+        function applySettings() {
+            const next = {
+                mqttUrl: $('setting-broker').value.trim(),
+                username: $('setting-user').value.trim(),
+                command: $('setting-command').value.trim(),
+                status: $('setting-status').value.trim(),
+                temp: $('setting-temp').value.trim(),
+                humid: $('setting-humid').value.trim(),
+                people: $('setting-people').value.trim()
+            };
+            if (!/^wss?:\/\/[^\s]+$/i.test(next.mqttUrl)) { notice('ต้องระบุ URL รูปแบบ wss://host:port/path หรือ ws://host:port/path', 'error'); return }
+            if (window.location.protocol === 'https:' && next.mqttUrl.toLowerCase().startsWith('ws://')) { notice('เว็บ HTTPS ต้องใช้ MQTT แบบ wss:// เพื่อหลีกเลี่ยง Mixed Content', 'error'); return }
+            if (Object.keys(next).some(k => k !== 'username' && !next[k])) { notice('กรุณาระบุ MQTT URL และทุก Topic', 'error'); return }
+            if ((new Set([next.command, next.status, next.temp, next.humid, next.people])).size !== 5) { notice('Topic แต่ละหน้าที่ต้องไม่ซ้ำกัน', 'error'); return }
+            voiceController.stop();
+            settings = next;
+            try { const persist = { ...next }; delete persist.username; localStorage.setItem('smartClassroomMqttSettingsV3Direct', JSON.stringify(persist)) } catch (_) { }
+            stopMqtt();
+            state.pending = null; state.requested = null; state.verifyState = 'unknown';
+            state.deviceOnline = false; state.statusQuality = 'unknown'; state.ac.power = null;
+            state.roomTemp = state.humid = state.people = null;
+            state.sensorAt = { temp: 0, humid: 0, people: 0 };
+            renderAll();
+            if (state.demo) toggleDemoMode(); else connectMqtt();
+            $('settings-panel').classList.add('hidden');
+            $('btn-settings').setAttribute('aria-expanded', 'false');
+            notice('บันทึกการเชื่อมต่อแล้ว กำลังเชื่อมต่อกับ Broker ใหม่', 'info');
+        }
+        function resetSettings() { voiceController.stop(); settings = { ...DEFAULTS }; settingsToForm(); notice('เติมค่าตั้งต้นแล้ว กรุณากด “บันทึกและเชื่อมต่อใหม่”', 'info') }
+        function stopMqtt() {
+            if (reconnectProbeTimer) { clearTimeout(reconnectProbeTimer); reconnectProbeTimer = null }
+            if (mqttClient) { const old = mqttClient; mqttClient = null; try { old.end(true) } catch (_) { } }
+            state.mqttConnected = false; state.deviceOnline = false; state.statusQuality = 'unknown';
+        }
+        function connectMqtt() {
+            if (state.demo) return;
+            if (typeof window.mqtt === 'undefined') {
+                notice('ไม่พบไลบรารี MQTT.js — ต้องใช้อินเทอร์เน็ตเพื่อโหลดไฟล์ไลบรารี หรือโฮสต์ไฟล์ไว้ภายในเครือข่าย', 'error', 0);
+                logEvent('error', 'ไม่สามารถโหลด MQTT.js ได้'); renderAll(); return;
+            }
+            try {
+                mqttClient = mqtt.connect(settings.mqttUrl, {
+                    clientId: 'classroom_web_' + Math.random().toString(16).slice(2, 10),
+                    clean: true, connectTimeout: 7000, reconnectPeriod: 4000, keepalive: 30, queueQoSZero: false,
+                    ...(settings.username ? { username: settings.username, password: $('setting-pass').value } : {})
+                });
+            } catch (err) { notice('เชื่อมต่อ MQTT ไม่ได้: ' + err.message, 'error'); logEvent('error', err.message); return }
+            const target = mqttClient;
+            target.on('connect', () => {
+                if (mqttClient !== target || state.demo) return;
+                state.mqttConnected = true;
+                state.deviceOnline = false;
+                state.statusQuality = 'unknown';
+                state.ac.power = null;
+                state.verifyState = 'unknown';
+                state.lastStatusAt = 0;
+                logEvent('info', 'เชื่อมต่อ MQTT Broker สำเร็จ กำลังขอสถานะ ESP32');
+                target.subscribe([settings.status, settings.temp, settings.humid, settings.people], { qos: 0 }, err => {
+                    if (err) { notice('Subscribe MQTT ไม่สำเร็จ: ' + err.message, 'error'); logEvent('error', 'Subscribe ไม่สำเร็จ'); return }
+                    if (reconnectProbeTimer) clearTimeout(reconnectProbeTimer);
+                    reconnectProbeTimer = setTimeout(() => requestDeviceStatus(false), 750);
+                });
+                renderAll();
+            });
+            target.on('message', (topic, buffer, packet) => {
+                if (mqttClient !== target || state.demo) return;
+                try { processMessage(topic, buffer.toString().trim(), Boolean(packet?.retain)) } catch (err) { logEvent('error', 'อ่านข้อความ MQTT ไม่สำเร็จ: ' + err.message) }
+            });
+            const disconnect = () => {
+                if (mqttClient !== target || state.demo) return;
+                if (state.mqttConnected) logEvent('warning', 'Broker ขาดการเชื่อมต่อ');
+                state.mqttConnected = false; state.deviceOnline = false; state.statusQuality = 'unknown';
+                if (state.pending) { voiceCommandResult(state.pending.id, false, 'การเชื่อมต่ออุปกรณ์ขาดหาย • ยังไม่ยืนยันคำสั่ง'); state.pending = null; state.requested = null; state.verifyState = 'timeout' }
+                renderAll();
+            };
+            target.on('offline', disconnect);
+            target.on('close', disconnect);
+            target.on('error', err => { if (mqttClient === target) console.warn('[MQTT]', err.message) });
+        }
+        function processMessage(topic, raw, retained) {
+            if (topic === settings.status) {
+                const data = parseValue(raw);
+                if (data && typeof data === 'object' && typeof data.status === 'string' && /offline/i.test(data.status)) {
+                    state.deviceOnline = false; state.statusQuality = 'unknown'; state.lastStatusAt = 0;
+                    if (state.pending) { voiceCommandResult(state.pending.id, false, 'การเชื่อมต่ออุปกรณ์ขาดหาย • ยังไม่ยืนยันคำสั่ง'); state.pending = null; state.requested = null; state.verifyState = 'timeout' }
+                    logEvent('warning', 'ESP32 รายงานว่า Offline'); renderAll(); return;
+                }
+                if (raw.toLowerCase() === 'engine online') return;
+                if (!data || typeof data !== 'object') return;
+                const power = typeof data.power === 'string' ? data.power.toUpperCase() : '';
+                const temp = Number(data.temp);
+                const mode = MODE_NAMES.indexOf(String(data.mode || '').toUpperCase());
+                const fan = FAN_NAMES.indexOf(String(data.fan || '').toUpperCase());
+                if (!['ON', 'OFF'].includes(power) || !numberInRange(temp, MIN_TEMP, MAX_TEMP) || mode < 0 || fan < 0) return;
+                const previous = state.ac.power;
+                state.ac = { power: power === 'ON', temp, mode, fan };
+                state.lastStatusAt = Date.now();
+                state.statusQuality = retained ? 'cached' : 'fresh';
+                state.deviceOnline = !retained;
+                if (!retained && finishPendingIfReported()) {
+                    // Matched last requested state after direct publish (device self-report only).
+                } else if (!state.pending && previous !== state.ac.power) {
+                    state.commandDetail = 'รับสถานะล่าสุดจาก ESP32 (ไม่ใช่การยืนยันจากแอร์)';
+                }
+                renderAll(); return;
+            }
+            const data = parseValue(raw);
+            if (topic === settings.temp) {
+                const candidate = (data && typeof data === 'object') ? (data.temp ?? data.temperature) : data;
+                const n = Number(candidate);
+                if (candidate !== '' && candidate !== null && numberInRange(n, -10, 60)) {
+                    state.roomTemp = n; state.sensorAt.temp = Date.now(); appendChartPoint(); renderEnvironment();
+                }
+            } else if (topic === settings.humid) {
+                const candidate = (data && typeof data === 'object') ? (data.humid ?? data.humidity) : data;
+                const n = Number(candidate);
+                if (candidate !== '' && candidate !== null && numberInRange(n, 0, 100)) {
+                    state.humid = n; state.sensorAt.humid = Date.now(); renderEnvironment();
+                }
+            } else if (topic === settings.people) {
+                const candidate = (data && typeof data === 'object') ? (data.total_people ?? data?.counts?.person ?? data.people) : data;
+                const n = Number(candidate);
+                if (candidate !== undefined && candidate !== null && candidate !== '' && Number.isInteger(n) && n >= 0 && n <= 1000) {
+                    state.people = n; state.sensorAt.people = Date.now(); renderEnvironment();
+                }
+            }
+        }
+        function pendingMatches(expected, actual) {
+            return expected.power === actual.power && (!expected.power || (expected.temp === actual.temp && expected.mode === actual.mode && expected.fan === actual.fan));
+        }
+        function finishPendingIfReported() {
+            const item = state.pending;
+            if (!item || item.stage !== 'DIRECT_SENT' || state.statusQuality !== 'fresh' || state.lastStatusAt < item.createdAt || !pendingMatches(item.expected, state.ac)) return false;
+            const label = item.label;
+            voiceCommandResult(item.id, true, 'ESP32 ตอบสถานะตรงกับคำสั่งแล้ว • ยังไม่ใช่การยืนยันว่าแอร์รับ IR');
+            state.pending = null; state.requested = null; state.verifyState = 'ir_sent';
+            state.commandDetail = `ESP32 รายงานสถานะตรงกับคำขอ: ${label} (ไม่ใช่การยืนยันแอร์รับ IR)`;
+            logEvent('info', state.commandDetail);
+            return true;
+        }
+        function sendMqtt(topic, payload, callback) {
+            if (!mqttClient || !state.mqttConnected || !mqttClient.connected) return false;
+            try { mqttClient.publish(topic, payload, { qos: 0, retain: false }, callback || (() => { })); return true }
+            catch (err) { logEvent('error', 'Publish ล้มเหลว: ' + err.message); return false }
+        }
+        function requestDeviceStatus(userInitiated = false) {
+            if (state.demo) { notice('โหมดจำลองจะไม่ส่ง MQTT ออกไป', 'info'); return }
+            if (!state.mqttConnected) { if (userInitiated) notice('ยังไม่เชื่อมต่อ MQTT Broker', 'warning'); return }
+            const now = Date.now();
+            if (now - state.lastPollAt < 2000) return;
+            state.lastPollAt = now;
+            if (sendMqtt(settings.command, 'STATUS')) {
+                if (userInitiated) notice('ส่งคำขอ STATUS ไป ESP32 แล้ว (ไม่มีการยิง IR)', 'info');
+                logEvent('info', 'ขอสถานะจาก ESP32 โดยตรง (ไม่ยิง IR)');
+            }
+        }
+        function sendAcCommand(next, label) {
+            if (!next || typeof next.power !== 'boolean' || !Number.isInteger(next.temp) || !numberInRange(next.temp, MIN_TEMP, MAX_TEMP) || !Number.isInteger(next.mode) || next.mode < 0 || next.mode > 2 || !Number.isInteger(next.fan) || next.fan < 0 || next.fan > 3) {
+                notice('ค่าคำสั่งไม่ถูกต้อง', 'error'); return false;
+            }
+            if (state.demo) {
+                state.ac = { ...next }; state.verifyState = 'demo'; state.requested = null; state.pending = null;
+                state.commandDetail = `จำลอง: ${label} (ไม่มีการส่งคำสั่งจริง)`;
+                logEvent('info', state.commandDetail); renderAll(); return { demo: true };
+            }
+            if (!commandAllowed()) { notice('MQTT Offline: ไม่ได้ส่งคำสั่ง กรุณาตรวจสอบการเชื่อมต่อ', 'warning'); return false }
+            if (state.pending) voiceCommandResult(state.pending.id, false, 'มีคำสั่งใหม่แทนคำสั่งเสียงก่อนหน้า • โปรดตรวจสถานะอุปกรณ์');
+            const id = `manual-${Date.now().toString(36)}-${++state.requestCount}`;
+            const payload = JSON.stringify({ POWER: next.power ? 1 : 0, TEMP: next.temp, MODE: next.mode, FAN: next.fan });
+            // Set pending before publish: a synchronous publish error cannot be overwritten by success UI.
+            state.requested = { ...next };
+            state.pending = { id, expected: { ...next }, label, createdAt: Date.now(), startedAt: Date.now(), stage: 'DIRECT_SENT' };
+            state.verifyState = 'sending';
+            const sent = sendMqtt(settings.command, payload, err => {
+                if (!err) return;
+                logEvent('error', 'MQTT Publish ผิดพลาด: ' + err.message);
+                voiceCommandResult(id, false, 'ส่งคำสั่ง MQTT ไม่สำเร็จ • กรุณาตรวจการเชื่อมต่อ');
+                if (state.pending?.id === id) { state.pending = null; state.requested = null; state.verifyState = 'timeout'; renderAll() }
+                notice('MQTT Publish ผิดพลาด: ไม่ยืนยันว่าคำสั่งถูกส่งแล้ว', 'error');
+            });
+            if (!sent || state.pending?.id !== id) {
+                if (state.pending?.id === id) { state.pending = null; state.requested = null; state.verifyState = 'timeout'; renderAll() }
+                notice('ส่ง MQTT ไม่สำเร็จ', 'error'); return false;
+            }
+            if (!state.deviceOnline) notice('ส่งคำขอเข้า MQTT แล้ว แต่ ESP32 ยังไม่ยืนยันว่าออนไลน์', 'warning', 5500);
+            state.commandDetail = `เว็บ Publish MQTT: ${label} • รอสถานะจาก ESP32 (ยังไม่ยืนยัน IR)`;
+            logEvent('info', state.commandDetail); renderAll();
+            return { id };
+        }
+        function handlePowerToggle() {
+            const current = currentDesired();
+            const power = current.power === null ? true : !current.power;
+            sendAcCommand({ ...current, power }, power ? 'เปิดแอร์' : 'ปิดแอร์');
+        }
+        function adjustTemperature(delta) {
+            const current = currentDesired();
+            if (current.power !== true) return;
+            const t = current.temp + delta;
+            if (t < MIN_TEMP || t > MAX_TEMP) return;
+            sendAcCommand({ ...current, temp: t }, `ปรับอุณหภูมิ ${t}°C`);
+        }
+        function selectQuickTemp(t) {
+            if (!numberInRange(t, MIN_TEMP, MAX_TEMP)) return;
+            const current = currentDesired();
+            sendAcCommand({ ...current, power: true, temp: t }, `ตั้งแอร์ ${t}°C`);
+        }
+        function chooseAcMode(mode) {
+            const current = currentDesired();
+            if (current.power !== true || ![0, 1, 2].includes(mode)) return;
+            sendAcCommand({ ...current, mode }, `เปลี่ยนโหมด ${MODE_NAMES[mode]}`);
+        }
+        function chooseAcFan(fan) {
+            const current = currentDesired();
+            if (current.power !== true || current.mode !== 0 || ![0, 1, 2, 3].includes(fan)) return;
+            sendAcCommand({ ...current, fan }, `ปรับแรงลม ${FAN_NAMES[fan]}`);
+        }
+        function switchMode(which) {
+            if (which === 'AUTO') notice('AUTO ยังไม่เปิดใช้งาน • ต้องเชื่อม CiRA CORE และเปิดระบบ Node-RED ก่อน ขณะนี้ยังอยู่ใน MANUAL เท่านั้น', 'warning', 11000);
+            else notice('ขณะนี้ใช้โหมดปรับด้วยตัวเอง (MANUAL)', 'info');
+        }
+        function renderThermostat() {
+            const card = $('thermostat-card');
+            const { power, temp, mode, fan } = currentDesired();
+            const canControl = commandAllowed();
+            const color = power === false ? 'theme-off' : power === null ? 'theme-off' : temp <= 23 ? 'theme-cool-strong' : temp === 24 ? 'theme-cool-normal' : 'theme-cool-eco';
+            card.className = `thermostat-card ${color} rounded-3xl p-6 sm:p-8 text-white flex flex-col justify-between min-h-[460px] relative overflow-hidden`;
+            $('ui-target-temp').textContent = power === null ? '—' : power === false ? 'ปิด' : String(temp);
+            $('ui-target-unit').textContent = power === true ? '°C' : '';
+            $('thermostat-subtitle').textContent = state.pending ? 'อุณหภูมิที่ร้องขอ (รอผลคำสั่ง)' : power === null ? 'กำลังรอสถานะจาก ESP32' : power === false ? 'เครื่องปรับอากาศ' : 'อุณหภูมิที่ ESP32 รายงานล่าสุด';
+            $('ui-cooling-desc').textContent = state.pending ? 'ค่าที่กำลังร้องขอ • ไม่ใช่การยืนยันว่าแอร์ทำงาน' : power === null ? 'ยังไม่ยืนยันสถานะอุปกรณ์ • สามารถส่งคำสั่งเปิดได้' : power === false ? 'ESP32 รายงานว่าปิด • เลือกอุณหภูมิเพื่อขอเปิดใหม่' : mode === 1 ? 'โหมด DRY • ลดความชื้น' : mode === 2 ? 'โหมด FAN • พัดลม' : temp <= 23 ? 'ระดับความเย็นสูง' : temp >= 25 ? 'ระดับประหยัดพลังงาน' : 'ระดับความเย็นมาตรฐาน';
+            $('btn-power-text').textContent = power === true ? 'ปิดแอร์' : 'เปิดแอร์';
+            $('btn-power').disabled = !canControl;
+            $('btn-temp-down').disabled = (!canControl || power !== true || temp <= MIN_TEMP);
+            $('btn-temp-up').disabled = (!canControl || power !== true || temp >= MAX_TEMP);
+            [23, 24, 25].forEach(t => {
+                const e = $('preset-' + t);
+                const selected = power === true && temp === t;
+                e.className = selected ? 'btn-press py-2.5 px-2 rounded-2xl bg-white text-sky-900 shadow-md text-center transition' : 'btn-press py-2.5 px-2 rounded-2xl bg-white/15 hover:bg-white/25 text-white backdrop-blur-md text-center transition';
+                e.disabled = !canControl;
+            });
+            document.querySelectorAll('[data-ac-mode]').forEach(button => {
+                const t = Number(button.getAttribute('data-ac-mode'));
+                button.classList.toggle('active', mode === t && power === true);
+                button.disabled = (!canControl || power !== true);
+            });
+            document.querySelectorAll('[data-ac-fan]').forEach(button => {
+                const t = Number(button.getAttribute('data-ac-fan'));
+                button.classList.toggle('active', fan === t && power === true && mode === 0);
+                button.disabled = (!canControl || power !== true || mode !== 0);
+            });
+            $('last-command-info').textContent = state.commandDetail || 'ยังไม่มีคำสั่ง • รีโมท IR เป็นการสื่อสารทางเดียว ไม่ยืนยันสถานะแอร์จริง';
+            renderVerify();
+        }
+        function renderVerify() {
+            const pill = $('verify-pill'), icon = $('verify-icon'), message = $('verify-message'), retry = $('retry-action-box');
+            let label = '', type = 'normal';
+            if (state.demo) { label = 'โหมดจำลอง • ไม่ส่ง IR จริง'; type = 'normal' }
+            else if (state.pending) { label = 'เว็บเรียก Publish MQTT แล้ว • รอสถานะ ESP32'; type = 'pending' }
+            else if (!state.mqttConnected) { label = 'ไม่ได้เชื่อมต่อ MQTT'; type = 'pending' }
+            else if (!state.deviceOnline) { label = state.statusQuality === 'cached' ? 'ได้รับสถานะเก่า • รอ ESP32 ตอบ' : 'ยังไม่พบ ESP32 ออนไลน์'; type = 'pending' }
+            else if (state.verifyState === 'timeout') { label = 'ไม่พบการตอบกลับคำสั่ง • โปรดตรวจสอบ'; type = 'error' }
+            else if (state.verifyState === 'ir_sent') { label = 'ESP32 ตอบสถานะตรงกับคำสั่งแล้ว'; type = 'normal' }
+            else { label = 'ESP32 ออนไลน์ • ยังไม่ยืนยันสถานะแอร์จริง'; type = 'normal' }
+            message.textContent = label;
+            pill.className = `inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full backdrop-blur-md text-xs sm:text-sm font-medium ${type === 'pending' ? 'bg-amber-400/25 animate-soft-pulse' : type === 'error' ? 'bg-rose-500/80' : 'bg-white/20'}`;
+            icon.className = `w-2.5 h-2.5 rounded-full ${type === 'error' ? 'bg-white' : type === 'pending' ? 'bg-amber-300' : 'bg-emerald-300'}`;
+            retry.classList.toggle('hidden', state.verifyState !== 'timeout');
+        }
+        function renderEnvironment() {
+            $('val-room-temp').textContent = isFreshSensor('temp') ? state.roomTemp.toFixed(1) : '—';
+            $('val-room-humid').textContent = isFreshSensor('humid') ? String(Math.round(state.humid)) : '—';
+            $('val-room-people').textContent = isFreshSensor('people') ? String(state.people) : '—';
+            const tempBadge = $('badge-room-temp'), humidDesc = $('desc-room-humid'), peopleDesc = $('desc-room-people');
+            if (!isFreshSensor('temp')) { tempBadge.className = 'inline-block text-xs font-medium px-2.5 py-1 rounded-full bg-slate-100 text-slate-500'; tempBadge.textContent = 'ยังไม่มีข้อมูล / ข้อมูลเก่า' }
+            else if (state.roomTemp >= 27) { tempBadge.className = 'inline-block text-xs font-medium px-2.5 py-1 rounded-full bg-rose-50 text-rose-700'; tempBadge.textContent = 'ห้องค่อนข้างร้อน' }
+            else if (state.roomTemp >= 23) { tempBadge.className = 'inline-block text-xs font-medium px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700'; tempBadge.textContent = 'อยู่ในช่วงสบาย' }
+            else { tempBadge.className = 'inline-block text-xs font-medium px-2.5 py-1 rounded-full bg-sky-50 text-sky-700'; tempBadge.textContent = 'อุณหภูมิค่อนข้างต่ำ' }
+            humidDesc.textContent = !isFreshSensor('humid') ? 'ยังไม่มีข้อมูลความชื้นจาก DHT22' : state.humid > 65 ? 'ความชื้นค่อนข้างสูง' : state.humid >= 40 ? 'ความชื้นระดับทั่วไป' : 'อากาศค่อนข้างแห้ง';
+            peopleDesc.textContent = !isFreshSensor('people') ? 'ยังไม่มีข้อมูลจาก CiRA CORE' : state.people === 0 ? 'กล้องตรวจพบ 0 คน (เว็บจะไม่ปิดแอร์เอง)' : state.people <= 10 ? 'มีผู้เรียนไม่มาก' : 'มีผู้เรียนค่อนข้างมาก';
+        }
+        function renderConnection() {
+            const pill = $('conn-pill'), dot = $('conn-dot'), text = $('conn-text');
+            const connected = state.demo || (state.mqttConnected && state.deviceOnline);
+            pill.className = `flex items-center gap-2 px-4 py-2 rounded-full border text-xs sm:text-sm font-medium ${connected ? 'bg-emerald-50 border-emerald-200/80 text-emerald-700' : 'bg-amber-50 border-amber-200/80 text-amber-700'}`;
+            dot.className = `w-2.5 h-2.5 rounded-full ${connected ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`;
+            text.textContent = state.demo ? 'โหมดจำลอง (ไม่ส่งจริง)' : connected ? 'ได้รับสถานะจาก ESP32' : state.mqttConnected ? 'เชื่อม MQTT แล้ว • รอ ESP32' : 'กำลังเชื่อมต่อ MQTT...';
+            $('device-line').textContent = state.demo ? 'กำลังจำลองการอ่านค่าและการสั่งแอร์ ไม่มีการส่งคำสั่ง MQTT' : `MQTT: ${state.mqttConnected ? 'เชื่อมต่อ' : 'ไม่เชื่อมต่อ'} • ESP32: ${state.deviceOnline ? 'ตอบแล้ว' : state.statusQuality === 'cached' ? 'มีแต่สถานะเก่า' : 'ยังไม่มีคำตอบ'} • ข้อมูลล่าสุด: ${readableAge(state.lastStatusAt)}`;
+        }
+        function renderAll() { renderThermostat(); renderEnvironment(); renderConnection() }
+        function updateClock() {
+            const now = new Date();
+            $('ui-datetime').textContent = now.toLocaleDateString('th-TH', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) + ' • เวลา ' + now.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) + ' น.';
+        }
+        function initChart() {
+            if (typeof window.Chart === 'undefined') {
+                const marker = document.createElement('p'); marker.className = 'text-sm text-slate-500 text-center mt-8'; marker.textContent = 'ไม่สามารถโหลด Chart.js ได้ (กราฟต้องโหลดไลบรารีก่อน)';
+                $('tempChart').parentNode.appendChild(marker); $('tempChart').style.display = 'none'; return;
+            }
+            chart = new Chart($('tempChart').getContext('2d'), {
+                type: 'line', data: {
+                    labels: [], datasets: [
+                        { label: 'อุณหภูมิห้องจริง (°C)', data: [], borderColor: '#0284C7', backgroundColor: 'rgba(14,165,233,.12)', borderWidth: 3, pointRadius: 2, tension: .4, fill: true },
+                        { label: 'อุณหภูมิที่ตั้งไว้ (°C)', data: [], borderColor: '#F59E0B', borderWidth: 2, borderDash: [6, 6], pointRadius: 0, tension: .2, fill: false }
+                    ]
+                }, options: { responsive: true, maintainAspectRatio: false, animation: false, plugins: { legend: { display: false } }, scales: { x: { grid: { display: false }, ticks: { color: '#64748B', maxTicksLimit: 7 } }, y: { suggestedMin: 21, suggestedMax: 30, grid: { color: '#F1F5F9' }, ticks: { color: '#64748B', callback: v => v + '°C' } } } }
+            });
+        }
+        function appendChartPoint(force = false) {
+            if (!chart || !isFreshSensor('temp')) return;
+            const now = Date.now();
+            if (!force && now - state.chartLastAt < 30000) return;
+            state.chartLastAt = now;
+            chart.data.labels.push(new Date().toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }));
+            chart.data.datasets[0].data.push(state.roomTemp);
+            chart.data.datasets[1].data.push(state.ac.power === true ? state.ac.temp : null);
+            if (chart.data.labels.length > 25) { chart.data.labels.shift(); chart.data.datasets.forEach(d => d.data.shift()) }
+            chart.update('none');
+        }
+        function resetChart() {
+            state.chartLastAt = 0;
+            if (chart) { chart.data.labels = []; chart.data.datasets.forEach(d => d.data = []); chart.update('none') }
+        }
+        function toggleDemoMode() {
+            voiceController.stop();
+            state.demo = !state.demo;
+            if (state.demo) {
+                stopMqtt(); state.pending = null;
+                state.ac = { power: true, temp: 24, mode: 0, fan: 3 }; state.requested = null; state.roomTemp = 25.2; state.humid = 54; state.people = 8;
+                state.sensorAt = { temp: Date.now(), humid: Date.now(), people: Date.now() }; state.verifyState = 'demo';
+                state.commandDetail = 'โหมดจำลอง • ไม่มีการสั่งงานจริง';
+                resetChart(); appendChartPoint(true);
+                logEvent('info', 'เปิดโหมดจำลอง: ยกเลิก MQTT Client แล้ว');
+            } else {
+                state.ac = { power: null, temp: 24, mode: 0, fan: 3 }; state.requested = null; state.pending = null; state.roomTemp = state.humid = state.people = null;
+                state.sensorAt = { temp: 0, humid: 0, people: 0 }; state.verifyState = 'unknown'; state.lastStatusAt = 0;
+                state.commandDetail = ''; resetChart();
+                logEvent('info', 'ปิดโหมดจำลอง: เริ่มเชื่อมต่อ MQTT อีกครั้ง'); connectMqtt();
+            }
+            $('demo-toolbar').classList.toggle('hidden', !state.demo);
+            $('demo-dot').className = `w-2 h-2 rounded-full ${state.demo ? 'bg-indigo-600 animate-ping' : 'bg-slate-400'}`;
+            $('demo-text').textContent = `โหมดจำลองทดสอบ: ${state.demo ? 'เปิด' : 'ปิด'}`;
+            renderAll();
+        }
+        window.devTools = {
+            simulateSensor(temp = 25, humid = 55, people = 10) {
+                if (!state.demo) { notice('ต้องเปิดโหมดจำลองก่อน', 'warning'); return }
+                const t = Number(temp), h = Number(humid), p = Number(people);
+                if (!numberInRange(t, -10, 60) || !numberInRange(h, 0, 100) || !Number.isInteger(p) || p < 0 || p > 1000) return;
+                state.roomTemp = t; state.humid = h; state.people = p;
+                state.sensorAt = { temp: Date.now(), humid: Date.now(), people: Date.now() };
+                appendChartPoint(true); renderAll(); logEvent('info', `จำลองเซนเซอร์: ${t}°C / ${h}% / ${p} คน`);
+            },
+            simulateVerify(status = 'ERROR_UNRESPONSIVE') {
+                if (!state.demo) { notice('ต้องเปิดโหมดจำลองก่อน', 'warning'); return }
+                notice('จำลองเหตุการณ์: ' + String(status) + ' (ไม่ได้รับผลจริงจากแอร์)', 'info');
+            }
+        };
+        function healthTick() {
+            if (state.pending && Date.now() - state.pending.startedAt > ACK_TIMEOUT_MS) {
+                const label = state.pending.label;
+                voiceCommandResult(state.pending.id, false, 'ไม่พบการตอบกลับจาก ESP32 • โปรดตรวจอุปกรณ์ก่อนสั่งซ้ำ');
+                state.pending = null; state.requested = null; state.verifyState = 'timeout';
+                state.commandDetail = `ไม่พบสถานะตอบกลับคำสั่ง “${label}” — ไม่ส่ง IR ซ้ำโดยอัตโนมัติ`;
+                logEvent('warning', state.commandDetail);
+                notice('ไม่พบการตอบกลับจาก ESP32: ตรวจสถานะแอร์ด้วยตาหรือรีโมทจริงก่อนกดซ้ำ', 'warning', 12000);
+            }
+            if (!state.demo && state.deviceOnline && Date.now() - state.lastStatusAt > DEVICE_STALE_MS) {
+                state.deviceOnline = false; state.statusQuality = 'unknown';
+                logEvent('warning', 'ESP32 ไม่ตอบ STATUS ตามกำหนด • เว็บยังส่ง MQTT ได้ แต่ไม่ยืนยันว่าอุปกรณ์จะได้รับคำสั่ง');
+            }
+            renderAll();
+        }
+        window.addEventListener('DOMContentLoaded', () => {
+            $('ui-room-name').textContent = ROOM_NAME;
+            loadSettings(); updateClock(); initChart(); renderAll();
+            connectMqtt();
+            setInterval(() => { updateClock() }, 30000);
+            setInterval(healthTick, 1000);
+            setInterval(() => { if (state.mqttConnected && !state.demo) requestDeviceStatus(false) }, 30000);
+            notice('MANUAL พร้อมส่งคำสั่ง MQTT ตรงไป ESP32 โดยไม่ผ่าน Node-RED • AUTO ยังปิดอยู่จนกว่าจะต่อกล้อง', 'info', 14000);
+        });
+
+        // Voice UI keeps the existing buttons, classes and notice area.
+        let alwaysOnWakeMode = false;
+        function updateVoiceButtonUI(stateMode, customLabel) {
+            const btn = $('btn-voice-cmd');
+            const dot = $('voice-dot');
+            const txt = $('voice-btn-text');
+            const wakeBtn = $('btn-wake-toggle');
+            const wakeDot = $('wake-dot');
+            const wakeTxt = $('wake-btn-text');
+
+            if (wakeBtn) {
+                wakeBtn.className = alwaysOnWakeMode
+                    ? 'btn-press text-xs font-semibold px-3.5 py-2 rounded-full border border-emerald-500 bg-emerald-600 text-white shadow-sm flex items-center gap-1.5'
+                    : 'btn-press text-xs font-semibold px-3.5 py-2 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 flex items-center gap-1.5';
+                wakeDot.className = `w-2 h-2 rounded-full ${alwaysOnWakeMode ? 'bg-white animate-ping' : 'bg-slate-400'}`;
+                wakeTxt.textContent = `ฟังคำสั่งต่อเนื่อง: ${alwaysOnWakeMode ? 'เปิดอยู่' : 'ปิด'}`;
+            }
+
+            if (!btn) return;
+            if (stateMode === 'LISTENING') {
+                btn.disabled = false;
+                btn.className = 'btn-press text-xs font-semibold px-4 py-2 rounded-full border border-rose-300 bg-rose-600 text-white shadow-md flex items-center gap-2';
+                dot.className = 'w-2.5 h-2.5 rounded-full bg-white animate-ping';
+                txt.textContent = customLabel || (alwaysOnWakeMode ? 'ฟังคำสั่งแอร์...' : 'กำลังฟัง... (พูดได้เลย)');
+            } else if (stateMode === 'INIT' || stateMode === 'PROCESSING') {
+                btn.disabled = false;
+                btn.className = 'btn-press text-xs font-semibold px-4 py-2 rounded-full border border-amber-300 bg-amber-500 text-white flex items-center gap-2';
+                dot.className = 'w-2 h-2 rounded-full bg-white animate-pulse';
+                txt.textContent = customLabel || 'กำลังประมวลผล...';
+            } else {
+                btn.disabled = false;
+                btn.className = 'btn-press text-xs font-semibold px-4 py-2 rounded-full border border-indigo-200 bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm flex items-center gap-2';
+                dot.className = 'w-2 h-2 rounded-full bg-white';
+                txt.textContent = customLabel || '🎤 กดเพื่อพูด';
+            }
+        }
+
+        const voiceLabels = {
+            OFF: '🎤 กดเพื่อพูด', INIT: 'กำลังเตรียมไมค์...',
+            WAIT_WAKE: 'พูดคำสั่งแอร์สั้น ๆ...', CAPTURE_WAKE: 'กำลังรับคำสั่ง...',
+            PROCESSING_WAKE: 'โมเดลในเครื่องกำลังประมวลผล...', READY: 'กำลังขานรับ...',
+            WAIT_COMMAND: 'พูดคำสั่งได้เลย...', CAPTURE_COMMAND: 'กำลังรับคำสั่ง...',
+            PROCESSING_COMMAND: 'กำลังประมวลผล...', WAIT_DEVICE: 'รอสถานะจาก ESP32...',
+            ACKNOWLEDGING: 'กำลังขานรับ...', FEEDBACK: 'ESP32 ตอบแล้ว', SPEAKING: 'กำลังพูดตอบกลับ...'
+        };
+        const voiceController = new SmartVoiceController({
+            fetch: (...args) => fetch(...args), id: () => crypto.randomUUID(),
+            audio: callbacks => new SmartVoiceAudio.VoiceAudio(callbacks), wav: SmartVoiceAudio.wav,
+            device: () => JSON.stringify([settings.mqttUrl, settings.command, state.demo]),
+            current: () => ({ ...currentDesired() }), revision: () => state.requestCount, pending: () => !!state.pending,
+            send: sendAcCommand, notice, log: logEvent, feedback: SmartVoiceFeedback.describe, wakeReplies: SmartVoiceFeedback.wakeReplies,
+            render: (phase, handsFree, label) => {
+                alwaysOnWakeMode = !!handsFree;
+                const listening = ['WAIT_WAKE', 'CAPTURE_WAKE', 'WAIT_COMMAND', 'CAPTURE_COMMAND'].includes(phase);
+                updateVoiceButtonUI(phase === 'OFF' ? 'IDLE' : listening ? 'LISTENING' : 'PROCESSING', label || voiceLabels[phase]);
+                $('btn-wake-toggle').setAttribute('aria-pressed', String(!!handsFree));
+                $('btn-voice-cmd').setAttribute('aria-busy', String(['INIT', 'ACKNOWLEDGING', 'PROCESSING_WAKE', 'PROCESSING_COMMAND', 'SPEAKING'].includes(phase)));
+                $('btn-voice-cmd').title = phase === 'OFF' ? 'กดเพื่อพูดคำสั่ง' : 'กดเพื่อยกเลิกการรับคำสั่งเสียง';
+            }
+        });
+        let voicePreferences;
+        try { voicePreferences = window.localStorage; } catch (_) { }
+        const handsFreeStartup = new SmartHandsFreeStartup({
+            controller: voiceController, document, window, storage: voicePreferences,
+            permission: () => navigator.permissions.query({ name: 'microphone' })
+        });
+        function toggleAlwaysOnWakeMode() {
+            if (voiceController.handsFree) { handsFreeStartup.stopByUser(); notice('ปิดฟังคำสั่งต่อเนื่องแล้ว', 'info', 3000); }
+            else void handsFreeStartup.startByUser();
+        }
+        function handleVoiceButtonClick() {
+            if (voiceController.state !== 'OFF') { handsFreeStartup.stopByUser(); notice('ยกเลิกการรับคำสั่งเสียงแล้ว', 'info', 3000); }
+            else { handsFreeStartup.setEnabled(false); void voiceController.start(false); }
+        }
+        function voiceCommandResult(id, success, message) { voiceController.deviceResult(id, success, message); }
+        $('voice-btn-text').setAttribute('aria-live', 'polite');
+        // Restore the user's hands-free preference without bypassing browser mic/audio permission.
+        if (document.readyState === 'loading') window.addEventListener('DOMContentLoaded', () => handsFreeStartup.install(), { once: true });
+        else handsFreeStartup.install();
+    </script>
+</body>
+
+</html>

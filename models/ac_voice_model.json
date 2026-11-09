@@ -1,0 +1,13 @@
+{
+  "file": "ac_voice_model_int8.tflite",
+  "sampleRate": 16000,
+  "samples": 24000,
+  "mfcc": 13,
+  "fft": 512,
+  "hop": 600,
+  "mean": -35.077686,
+  "std": 143.896851,
+  "labels": ["0_ON", "1_OFF", "2_TEMP_UP", "3_TEMP_DOWN", "4_PRESET_TURBO", "5_PRESET_ECO", "6_BACKGROUND"],
+  "threshold": 0.90,
+  "margin": 0.25
+}

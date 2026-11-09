@@ -1,0 +1,22 @@
+{
+  "name": "smart_university_web",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@ricky0123/vad-web": "^0.0.19",
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.9",
+    "express": "^5.3.0",
+    "multer": "^2.5.0",
+    "onnxruntime-web": "^1.14.0"
+  }
+}

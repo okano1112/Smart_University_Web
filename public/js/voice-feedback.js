@@ -1,0 +1,28 @@
+(function (root) {
+    'use strict';
+    const phrases = {
+        'wake-help': 'มีอะไรให้ช่วยครับ', 'wake-listening': 'ครับ กำลังฟังอยู่ครับ', 'wake-ready': 'ครับ พูดได้เลยครับ',
+        'power-on': 'เปิดแอร์ครับ', 'power-off': 'ปิดแอร์ครับ',
+        'fan-0': 'ปรับพัดลมเป็นอัตโนมัติครับ', 'fan-1': 'ปรับพัดลมเป็นระดับเบาครับ',
+        'fan-2': 'ปรับพัดลมเป็นระดับกลางครับ', 'fan-3': 'ปรับพัดลมเป็นระดับแรงครับ',
+        'mode-0': 'ปรับเป็นโหมดทำความเย็นครับ', 'mode-1': 'ปรับเป็นโหมดลดความชื้นครับ', 'mode-2': 'ปรับเป็นโหมดพัดลมครับ',
+        'not-understood': 'ไม่เข้าใจคำสั่งครับ กรุณาพูดใหม่', 'not-sent': 'ยังส่งคำสั่งไม่ได้ครับ กรุณาตรวจสอบการเชื่อมต่อ'
+    };
+    for (let temp = 21; temp <= 27; temp++) phrases[`temp-${temp}`] = `ตั้งอุณหภูมิ ${temp} องศาครับ`;
+    function describe(next, current = {}, fields) {
+        if (!next || typeof next.power !== 'boolean' || !Number.isInteger(next.temp) || next.temp < 21 || next.temp > 27 || ![0, 1, 2].includes(next.mode) || ![0, 1, 2, 3].includes(next.fan)) return null;
+        const requested = new Set(Array.isArray(fields) ? fields : ['power', 'temp', 'mode', 'fan'].filter(key => current[key] !== next[key]));
+        if (!next.power) return { text: phrases['power-off'], clips: ['power-off'] };
+        const clips = [];
+        if (requested.has('power')) clips.push('power-on');
+        if (requested.has('temp')) clips.push(`temp-${next.temp}`);
+        if (requested.has('mode')) clips.push(`mode-${next.mode}`);
+        if (requested.has('fan')) clips.push(`fan-${next.fan}`);
+        if (!clips.length) clips.push(`temp-${next.temp}`);
+        return { text: clips.map(key => phrases[key]).join(' '), clips };
+    }
+    const wakeReplies = ['wake-help', 'wake-listening', 'wake-ready'].map(key => ({ text: phrases[key], clips: [key] }));
+    const api = { phrases, describe, wakeReplies };
+    root.SmartVoiceFeedback = api;
+    if (typeof module !== 'undefined') module.exports = api;
+})(typeof window === 'undefined' ? globalThis : window);

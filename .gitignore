@@ -1,3 +1,7 @@
 
 .venv-voice/
 __pycache__/
+
+models/whisper-small/
+models/whisper-medium/
+models/whisper-th-small/

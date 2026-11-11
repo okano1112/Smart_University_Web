@@ -50,7 +50,7 @@
                 let gestureTimer;
                 try {
                     await Promise.race([resumed, new Promise((_, reject) => {
-                        gestureTimer = setTimeout(() => reject(Object.assign(new Error('แตะหน้าจอครั้งเดียวเพื่อเริ่มฟัง Engi'), { code: 'VOICE_GESTURE_REQUIRED' })), 500);
+                        gestureTimer = setTimeout(() => reject(Object.assign(new Error('แตะหน้าจอครั้งเดียวเพื่อเริ่มฟังคำสั่ง'), { code: 'VOICE_GESTURE_REQUIRED' })), 500);
                     })]);
                 } finally { clearTimeout(gestureTimer); }
             } else await resumed;
@@ -77,11 +77,11 @@
                     frameSamples: 512, workletOptions: { processorOptions: { frameSamples: 512 } },
                     positiveSpeechThreshold: 0.5, negativeSpeechThreshold: 0.35,
                     preSpeechPadFrames: 10, // 512/16000 * 10 = 320 ms.
-                    redemptionFrames: 10, // 320 ms of silence; finish short commands sooner.
+                    redemptionFrames: 16, // 512 ms: preserve short pauses inside a natural command.
                     minSpeechFrames: 3, // 96 ms; short names are not rejected at 288 ms.
-                    onSpeechStart: () => this.speechStart(),
-                    onSpeechEnd: samples => this.speechEnd(samples),
-                    onVADMisfire: () => { if (this.inputSuppressed) return; this.speaking = false; clearTimeout(this.maxTimer); this.callbacks.onMisfire(); }
+                    onSpeechStart: () => { if (this.processingInputEpoch === this.inputEpoch) this.speechStart(); },
+                    onSpeechEnd: samples => { if (this.processingInputEpoch === this.inputEpoch) this.speechEnd(samples); },
+                    onVADMisfire: () => { if (this.inputSuppressed || this.processingInputEpoch !== this.inputEpoch) return; this.speaking = false; clearTimeout(this.maxTimer); this.callbacks.onMisfire(); }
                 });
                 if (this.closed) { this.detector.destroy(); return; }
                 // Serialize ONNX inference: slow frames must not mutate model state concurrently.
@@ -91,14 +91,20 @@
                     if (this.closed || this.inputSuppressed) return Promise.resolve();
                     const inputEpoch = this.inputEpoch;
                     if (++pending > 64) {
+                        pending--;
                         this.callbacks.onError(new Error('เครื่องประมวลผลเสียงไม่ทัน กรุณาเปิดไมค์ใหม่'));
                         return Promise.resolve();
                     }
-                    frames = frames.then(() => { if (!this.closed && !this.inputSuppressed && inputEpoch === this.inputEpoch) return processFrame(frame); })
+                    frames = frames.then(() => { if (!this.closed && !this.inputSuppressed && inputEpoch === this.inputEpoch) { this.processingInputEpoch = inputEpoch; return processFrame(frame); } })
                         .catch(error => { if (!this.closed) this.callbacks.onError(error); }).finally(() => { pending--; });
                     return frames;
                 };
+                this.inferenceIdle = () => frames;
                 this.detector.receive(this.source);
+                // Keep capture in the active audio graph even when no microphone audio
+                // is played through speakers. Some browsers stop disconnected worklets.
+                this.captureSink = this.context.createGain(); this.captureSink.gain.value = 0;
+                this.detector.entryNode.connect(this.captureSink); this.captureSink.connect(this.context.destination);
                 this.detector.start();
                 this.kind = 'silero';
             } catch (error) {
@@ -155,7 +161,7 @@
                 if (this.speaking) {
                     chunks.push(frame); duration += frameMs;
                     if (speech) { silence = 0; voiced += frameMs; } else silence += frameMs;
-                    if (silence >= 350) {
+                    if (silence >= 520) {
                         const audio = resample(merge(chunks), this.context.sampleRate);
                         chunks = []; duration = 0;
                         if (voiced >= 96) this.speechEnd(audio);
@@ -170,7 +176,12 @@
             this.speaking = false; clearTimeout(this.maxTimer);
             this.resetFallback?.();
             if (suppressed) this.detector?.pause();
-            else if (!this.closed) this.detector?.start();
+            else if (!this.closed) {
+                const epoch = this.inputEpoch;
+                Promise.resolve(this.inferenceIdle?.()).then(() => {
+                    if (!this.closed && !this.inputSuppressed && epoch === this.inputEpoch) { this.detector?.pause(); this.detector?.start(); }
+                });
+            }
         }
         loadClip(key) {
             if (!Object.hasOwn(root.SmartVoiceFeedback?.phrases || {}, key)) return Promise.reject(new Error('ไม่พบข้อความเสียงตอบกลับ'));
@@ -214,6 +225,8 @@
                     } catch (error) { finish(error); }
                 });
             } finally {
+                // Let speaker/room reverberation fade before opening input again.
+                if (!this.closed && id === this.replyId) await new Promise(resolve => setTimeout(resolve, 140));
                 if (!this.closed && id === this.replyId) this.setInputSuppressed(false);
             }
         }
@@ -234,7 +247,7 @@
         close() {
             if (this.closed) return;
             this.closed = true; this.replyId++; this.assetController.abort(); this.replyFinish?.(); clearTimeout(this.maxTimer);
-            this.detector?.destroy(); this.worklet?.disconnect(); this.source?.disconnect(); this.silentGain?.disconnect();
+            this.detector?.destroy(); this.captureSink?.disconnect(); this.worklet?.disconnect(); this.source?.disconnect(); this.silentGain?.disconnect();
             this.stream?.getTracks().forEach(track => track.stop());
             if (this.context && this.context.state !== 'closed') this.context.close().catch(() => {});
         }

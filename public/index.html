@@ -5,6 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Smart Classroom | ควบคุมแอร์ ESP32</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230284c7'/%3E%3Cpath d='M16 6v20M7.3 11l17.4 10M7.3 21l17.4-10' stroke='white' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- MQTT.js (ทำงานอยู่เบื้องหลัง ไม่แสดงศัพท์เทคนิคบนหน้าจอ) -->
@@ -14,6 +15,7 @@
     <!-- โหลด ONNX Runtime และ Silero VAD จาก Local Server (ไม่ติด CORS / ไม่ขึ้น 404) -->
     <script src="/ort/ort.js"></script>
     <script src="/vad-web/bundle.min.js"></script>
+    <script src="/js/cooling-forecast-client.js"></script>
     <script src="/js/voice-feedback.js"></script>
     <script src="/js/voice-audio.js"></script>
     <script src="/js/voice-controller.js"></script>
@@ -178,12 +180,12 @@
                     <span id="demo-text">โหมดจำลองทดสอบ: ปิด</span>
                 </button>
 
-                <!-- ปุ่มเปิดโหมด Hands-Free เรียกชื่อ "Engi" โดยไม่ต้องกดปุ่ม -->
+                <!-- ปุ่มเปิดฟังคำสั่งบนเครื่องต่อเนื่อง -->
                 <button id="btn-wake-toggle" type="button" onclick="toggleAlwaysOnWakeMode()"
                     class="btn-press text-xs font-semibold px-3.5 py-2 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 flex items-center gap-1.5"
-                    title="เปิดฟังคำสั่งแอร์ต่อเนื่องโดยไม่เรียกชื่อ โมเดลในเครื่องยังไม่รองรับ Engi">
+                    title="เรียก Engi หรือ เอ็นจี้ ก่อนพูดคำสั่ง หรือพูดชื่อพร้อมคำสั่งได้เลย">
                     <span id="wake-dot" class="w-2 h-2 rounded-full bg-slate-400"></span>
-                    <span id="wake-btn-text">ฟังคำสั่งต่อเนื่อง: ปิด</span>
+                    <span id="wake-btn-text">โหมดเรียก Engi: ปิด</span>
                 </button>
 
                 <!-- ปุ่มสั่งงานด้วยเสียงแบบกดเพื่อพูดทันที -->
@@ -580,12 +582,12 @@
         <!-- ================================================================= -->
         <!-- 4. กราฟแนวโน้มอุณหภูมิในห้องเรียน (สะอาดตา อ่านง่ายสำหรับคนทั่วไป)      -->
         <!-- ================================================================= -->
-        <section class="bg-white rounded-3xl p-6 shadow-sm border border-slate-100">
+        <section id="temperature-panel" class="bg-white rounded-3xl p-6 shadow-sm border border-slate-100">
             <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
                 <div>
-                    <h2 class="text-base sm:text-lg font-bold text-slate-800">แนวโน้มอุณหภูมิภายในห้องเรียน</h2>
+                    <h2 class="text-base sm:text-lg font-bold text-slate-800">อุณหภูมิห้องและเวลาถึงเป้าหมาย</h2>
                     <p class="text-xs sm:text-sm text-slate-500">
-                        แสดงการเปลี่ยนแปลงของอุณหภูมิห้องเปรียบเทียบกับอุณหภูมิแอร์ที่ตั้งไว้</p>
+                        ข้อมูลจริงและเส้นคาดการณ์จากเซิร์ฟเวอร์ แสดงต่อกันในกราฟเดียว</p>
                 </div>
                 <div class="flex items-center gap-4 text-xs text-slate-500">
                     <span class="flex items-center gap-1.5">
@@ -596,8 +598,31 @@
                     </span>
                 </div>
             </div>
-            <div class="relative h-60 w-full">
-                <canvas id="tempChart"></canvas>
+            <div id="cooling-forecast-panel">
+                <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+                    <p id="forecast-summary" class="text-sm font-medium text-slate-700" aria-live="polite">รออุณหภูมิห้องและสถานะแอร์ล่าสุด</p>
+                    <span id="forecast-source" class="text-xs px-2.5 py-1 rounded-full bg-slate-100 text-slate-600">รอข้อมูล</span>
+                </div>
+                <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-3">
+                    <div class="rounded-2xl bg-slate-50 p-3"><p class="text-xs text-slate-500">อุณหภูมิห้องล่าสุด</p><p id="forecast-current" class="text-xl font-bold text-slate-800 mt-1">—</p></div>
+                    <div class="rounded-2xl bg-slate-50 p-3"><p class="text-xs text-slate-500">เป้าหมายที่ ESP32 รายงาน</p><p id="forecast-target" class="text-xl font-bold text-slate-800 mt-1">—</p></div>
+                    <div class="rounded-2xl bg-violet-50 p-3"><p id="forecast-arrival-label" class="text-xs text-violet-700">คาดว่าจะถึงเป้าหมายเวลา</p><p id="forecast-arrival" class="text-xl font-bold text-violet-800 mt-1">—</p></div>
+                    <div class="rounded-2xl bg-violet-50 p-3"><p class="text-xs text-violet-700">เวลาที่เหลือโดยประมาณ</p><p id="forecast-eta" class="text-xl font-bold text-violet-800 mt-1">รอข้อมูล</p></div>
+                </div>
+                <p id="forecast-detail" class="text-sm text-slate-600 mb-2">รออุณหภูมิห้องและสถานะแอร์ล่าสุด</p>
+                <p id="forecast-range" class="text-xs text-slate-500 mb-3"></p>
+                <div class="relative h-72 sm:h-80 w-full"><canvas id="tempChart" aria-label="กราฟอุณหภูมิห้องจริง เป้าหมาย และเวลาที่คาดว่าจะถึงเป้าหมาย" role="img"></canvas></div>
+                <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500 mt-2">
+                    <span><span class="text-sky-600">●</span> เซนเซอร์จริง</span><span><span class="text-violet-600">┄</span> คาดการณ์</span><span><span class="text-amber-600">┄</span> เป้าหมาย</span><span>พื้นที่สีอ่อน = ช่วงสถานการณ์ที่เป็นไปได้</span>
+                </div>
+                <details class="mt-4 text-xs text-slate-500">
+                    <summary class="cursor-pointer text-sky-700 font-medium">วิธีประมาณและอัตราเริ่มต้น</summary>
+                    <p class="mt-2 leading-relaxed">เซิร์ฟเวอร์คำนวณเวลาถึงเป้าหมายจากแนวโน้มอุณหภูมิที่อ่านได้จริง ช่วงแรกที่ข้อมูลยังไม่พอจะใช้อัตราสมมติด้านล่าง เมื่อมีอย่างน้อย 6 จุดนาน 3 นาทีจะใช้อัตราที่วัดได้ เวลาจริงเปลี่ยนตามกำลังแอร์ ขนาดห้อง จำนวนคน และการเปิดประตู ค่าที่แสดงไม่ใช่เวลารับประกัน</p>
+                    <label class="flex flex-wrap items-center gap-2 mt-3">อัตราลดอุณหภูมิที่สมมติ
+                        <input id="forecast-rate" type="number" min="0.02" max="0.5" step="0.01" value="0.10" class="w-24 px-2 py-1.5 border border-slate-200 rounded-lg text-slate-800" aria-describedby="forecast-rate-help" onchange="changeForecastRate()"> °C / นาที
+                    </label>
+                    <p id="forecast-rate-help" class="mt-1">ตัวอย่างสมมติ: เวลา 14:30 น. ห้อง 28°C เป้า 25°C ที่ 0.10°C/นาที เซิร์ฟเวอร์จะคาดว่าถึง 25°C เวลา 15:00 น. ใช้อีกประมาณ 30 นาที การเปลี่ยนค่านี้ไม่สั่งแอร์</p>
+                </details>
             </div>
         </section>
         <section class="bg-white rounded-3xl p-5 sm:p-6 shadow-sm border border-slate-100">
@@ -662,6 +687,11 @@
         let settings = { ...DEFAULTS };
         let mqttClient = null;
         let chart = null;
+        const temperatureHistory = [];
+        const targetHistory = [];
+        const coolingForecast = new SmartCoolingForecastClient.ForecastClient({ fetch: (...args) => fetch(...args), onChange: () => renderForecast() });
+        let assumedCoolingRate = .1;
+        try { const saved=Number(localStorage.getItem('smartCoolingRateV1')); if(saved>=.02&&saved<=.5)assumedCoolingRate=saved; } catch(_) {}
         let noticeTimer = null;
         let reconnectProbeTimer = null;
 
@@ -748,7 +778,7 @@
             stopMqtt();
             state.pending = null; state.requested = null; state.verifyState = 'unknown';
             state.deviceOnline = false; state.statusQuality = 'unknown'; state.ac.power = null;
-            state.roomTemp = state.humid = state.people = null;
+            state.roomTemp = state.humid = state.people = null; resetChart();
             state.sensorAt = { temp: 0, humid: 0, people: 0 };
             renderAll();
             if (state.demo) toggleDemoMode(); else connectMqtt();
@@ -839,7 +869,7 @@
                 const candidate = (data && typeof data === 'object') ? (data.temp ?? data.temperature) : data;
                 const n = Number(candidate);
                 if (candidate !== '' && candidate !== null && numberInRange(n, -10, 60)) {
-                    state.roomTemp = n; state.sensorAt.temp = Date.now(); appendChartPoint(); renderEnvironment();
+                    state.roomTemp = n; state.sensorAt.temp = retained ? 0 : Date.now(); appendChartPoint(); renderEnvironment(); renderForecast();
                 }
             } else if (topic === settings.humid) {
                 const candidate = (data && typeof data === 'object') ? (data.humid ?? data.humidity) : data;
@@ -1016,39 +1046,153 @@
             text.textContent = state.demo ? 'โหมดจำลอง (ไม่ส่งจริง)' : connected ? 'ได้รับสถานะจาก ESP32' : state.mqttConnected ? 'เชื่อม MQTT แล้ว • รอ ESP32' : 'กำลังเชื่อมต่อ MQTT...';
             $('device-line').textContent = state.demo ? 'กำลังจำลองการอ่านค่าและการสั่งแอร์ ไม่มีการส่งคำสั่ง MQTT' : `MQTT: ${state.mqttConnected ? 'เชื่อมต่อ' : 'ไม่เชื่อมต่อ'} • ESP32: ${state.deviceOnline ? 'ตอบแล้ว' : state.statusQuality === 'cached' ? 'มีแต่สถานะเก่า' : 'ยังไม่มีคำตอบ'} • ข้อมูลล่าสุด: ${readableAge(state.lastStatusAt)}`;
         }
-        function renderAll() { renderThermostat(); renderEnvironment(); renderConnection() }
+        function renderAll() { renderThermostat(); renderEnvironment(); renderConnection(); renderForecast() }
         function updateClock() {
             const now = new Date();
             $('ui-datetime').textContent = now.toLocaleDateString('th-TH', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) + ' • เวลา ' + now.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) + ' น.';
         }
+        function forecastContext() { return JSON.stringify([settings.mqttUrl, settings.temp, settings.status, state.demo, state.ac.power, state.ac.temp, state.ac.mode, state.ac.fan]); }
+        function recordForecastSample() {
+            if (!isFreshSensor('temp') || (!state.demo && (!state.deviceOnline || state.statusQuality !== 'fresh')) || state.pending) return;
+            coolingForecast.record({time:state.sensorAt.temp,temp:state.roomTemp,context:forecastContext()});
+        }
+        function changeForecastRate() {
+            const rate=Number($('forecast-rate').value);
+            if (!Number.isFinite(rate)||rate<.02||rate>.5) { $('forecast-rate').value=assumedCoolingRate.toFixed(2); notice('กรุณาระบุอัตราระหว่าง 0.02–0.50 °C/นาที', 'warning'); return; }
+            assumedCoolingRate=rate;
+            try { localStorage.setItem('smartCoolingRateV1',String(rate)); } catch(_) {}
+            renderForecast();
+        }
+        function recordTargetChange(statusFresh) {
+            const target = statusFresh && state.ac.power === true ? state.ac.temp : null;
+            if (!targetHistory.length || targetHistory.at(-1).target !== target) targetHistory.push({ time: Date.now(), target });
+            const cutoff = Date.now() - 15 * 60000;
+            // Keep one earlier value to carry an unchanged target across the left edge.
+            while (targetHistory.length > 1 && (targetHistory.length > 80 || targetHistory[1].time <= cutoff)) targetHistory.shift();
+        }
+        function renderForecast() {
+            if (!$('forecast-eta')) return;
+            const setText = (id, value) => { if ($(id).textContent !== value) $(id).textContent = value; };
+            recordForecastSample();
+            const fresh = isFreshSensor('temp') && Date.now() - state.sensorAt.temp <= SENSOR_STALE_MS;
+            const statusFresh = state.demo || (state.mqttConnected && state.deviceOnline && state.statusQuality === 'fresh' && Date.now() - state.lastStatusAt < DEVICE_STALE_MS);
+            recordTargetChange(statusFresh);
+            const prediction = coolingForecast.sync({ roomTemp: state.roomTemp, target: state.ac.temp, power: state.ac.power, mode: state.ac.mode,
+                sensorAt: state.sensorAt.temp, statusAt: state.demo ? state.sensorAt.temp : state.lastStatusAt,
+                statusFresh, pending: !!state.pending, assumedRate: assumedCoolingRate }, forecastContext());
+            const { duration, clockTime, remainingMinutes } = SmartCoolingForecastClient;
+            const now = coolingForecast.nowOnServer(), estimating = prediction.kind === 'estimate';
+            const arrival = estimating ? clockTime(prediction.arrivalAt, now) : '—';
+            const remaining = estimating ? duration(remainingMinutes(prediction, now)) : '';
+            const awaitingReading = estimating && prediction.arrivalAt <= now;
+            setText('forecast-current', fresh && Number.isFinite(state.roomTemp) ? state.roomTemp.toFixed(1) + '°C' : '—');
+            setText('forecast-target', statusFresh && state.ac.power === true ? state.ac.temp + '°C' : '—');
+            setText('forecast-arrival-label', `คาดว่าจะถึง${statusFresh && state.ac.power === true ? ' ' + state.ac.temp + '°C' : 'เป้าหมาย'} เวลา`);
+            setText('forecast-arrival', arrival);
+            setText('forecast-eta', estimating ? awaitingReading ? 'รอเซนเซอร์ยืนยัน' : 'อีกประมาณ ' + remaining : prediction.kind === 'reached' ? 'ถึงเป้าหมายแล้ว' : prediction.kind === 'loading' ? 'กำลังคำนวณ' : 'ยังประมาณไม่ได้');
+            setText('forecast-summary', estimating ? awaitingReading ? `ตามแนวโน้มคาดว่าจะถึง ${state.ac.temp}°C เวลา ${arrival} ขณะนี้รอเซนเซอร์ยืนยัน` : `คาดว่าอุณหภูมิห้องจะถึง ${state.ac.temp}°C ประมาณ ${arrival} ใช้เวลาอีกประมาณ ${remaining}` : prediction.message);
+            setText('forecast-source', (state.demo ? 'จำลอง • ' : '') + (prediction.source === 'measured' ? 'เซิร์ฟเวอร์ • แนวโน้มเซนเซอร์' : prediction.source === 'assumed' ? 'เซิร์ฟเวอร์ • อัตราสมมติ' : prediction.kind === 'loading' ? 'กำลังคำนวณ' : 'รอข้อมูล / เงื่อนไข'));
+            setText('forecast-detail', prediction.message);
+            setText('forecast-range', estimating ? `ช่วงเวลาตามสถานการณ์ ${clockTime(prediction.earliestAt, now)} ถึง ${clockTime(prediction.latestAt, now)} • ${prediction.rate.toFixed(2)}°C/นาที${prediction.source === 'assumed' ? ' • อัตราสมมติ ±30%' : ' • ไม่ใช่ช่วงความเชื่อมั่นทางสถิติ'}` : '');
+            if (!chart) return;
+            const future = prediction.points;
+            // Observations use the browser clock; the server returns canonical times.
+            const plotOffset = estimating ? future[0].time - state.sensorAt.temp : coolingForecast.clockOffset;
+            const past = temperatureHistory.map(p => ({ x: p.time + plotOffset, y: p.temp }));
+            const latestAt = state.sensorAt.temp + plotOffset;
+            if (fresh && (!past.length || past.at(-1).x !== latestAt)) past.push({ x: latestAt, y: state.roomTemp });
+            const start = past[0]?.x || now - 15 * 60000;
+            const end = Math.max(now, future.at(-1)?.time || now);
+            const target = [];
+            let priorTarget = null;
+            for (const event of targetHistory) {
+                const time = event.time + plotOffset;
+                if (time <= start) { priorTarget = event.target; continue; }
+                if (!target.length) target.push({ x: start, y: priorTarget });
+                target.push({ x: time, y: priorTarget }, { x: time, y: event.target });
+                priorTarget = event.target;
+            }
+            if (!target.length) target.push({ x: start, y: priorTarget });
+            target.push({ x: end, y: priorTarget });
+            chart.data.datasets[0].data = past;
+            chart.data.datasets[1].data = target;
+            chart.data.datasets[2].data = future.map(p => ({ x: p.time, y: p.lower }));
+            chart.data.datasets[3].data = future.map(p => ({ x: p.time, y: p.upper }));
+            chart.data.datasets[4].data = future.map(p => ({ x: p.time, y: p.temp }));
+            chart.data.datasets[5].data = estimating && prediction.arrivalAt <= end ? [{ x: prediction.arrivalAt, y: state.ac.temp }] : [];
+            chart.coolingTimes = estimating ? { now, arrivalAt: prediction.arrivalAt, arrival, target: state.ac.temp } : null;
+            chart.options.scales.x.min = start;
+            chart.options.scales.x.max = Math.max(start + 60000, end);
+            chart.update('none');
+        }
+        const coolingTimeMarkers = {
+            id: 'coolingTimeMarkers',
+            afterDatasetsDraw(graph) {
+                const times = graph.coolingTimes;
+                if (!times) return;
+                const { ctx, chartArea: area, scales: { x } } = graph;
+                ctx.save(); ctx.font = '11px Prompt, sans-serif'; ctx.textBaseline = 'top';
+                const line = (time, color) => {
+                    const px = x.getPixelForValue(time);
+                    if (px < area.left || px > area.right) return null;
+                    ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.setLineDash([3, 4]);
+                    ctx.beginPath(); ctx.moveTo(px, area.top); ctx.lineTo(px, area.bottom); ctx.stroke(); ctx.setLineDash([]);
+                    return px;
+                };
+                const currentX = line(times.now, '#94A3B8');
+                if (currentX !== null) { ctx.fillStyle = '#64748B'; ctx.fillText('ตอนนี้', Math.min(area.right - 34, Math.max(area.left, currentX + 5)), area.top + 3); }
+                const arrivalX = line(times.arrivalAt, '#8B5CF6');
+                if (arrivalX !== null) {
+                    const label = `ถึง ${times.target}°C ≈ ${times.arrival}`;
+                    const width = ctx.measureText(label).width;
+                    const left = Math.max(area.left + 2, Math.min(arrivalX - width / 2, area.right - width - 2));
+                    ctx.fillStyle = '#FFFFFF'; ctx.fillRect(left - 3, area.top + 19, width + 6, 18);
+                    ctx.fillStyle = '#7C3AED'; ctx.fillText(label, left, area.top + 22);
+                }
+                ctx.restore();
+            }
+        };
         function initChart() {
+            $('forecast-rate').value = assumedCoolingRate.toFixed(2);
             if (typeof window.Chart === 'undefined') {
                 const marker = document.createElement('p'); marker.className = 'text-sm text-slate-500 text-center mt-8'; marker.textContent = 'ไม่สามารถโหลด Chart.js ได้ (กราฟต้องโหลดไลบรารีก่อน)';
                 $('tempChart').parentNode.appendChild(marker); $('tempChart').style.display = 'none'; return;
             }
             chart = new Chart($('tempChart').getContext('2d'), {
-                type: 'line', data: {
-                    labels: [], datasets: [
-                        { label: 'อุณหภูมิห้องจริง (°C)', data: [], borderColor: '#0284C7', backgroundColor: 'rgba(14,165,233,.12)', borderWidth: 3, pointRadius: 2, tension: .4, fill: true },
-                        { label: 'อุณหภูมิที่ตั้งไว้ (°C)', data: [], borderColor: '#F59E0B', borderWidth: 2, borderDash: [6, 6], pointRadius: 0, tension: .2, fill: false }
-                    ]
-                }, options: { responsive: true, maintainAspectRatio: false, animation: false, plugins: { legend: { display: false } }, scales: { x: { grid: { display: false }, ticks: { color: '#64748B', maxTicksLimit: 7 } }, y: { suggestedMin: 21, suggestedMax: 30, grid: { color: '#F1F5F9' }, ticks: { color: '#64748B', callback: v => v + '°C' } } } }
+                type: 'line', plugins: [coolingTimeMarkers], data: { datasets: [
+                    { label: 'อุณหภูมิห้องจริง', data: [], borderColor: '#0284C7', borderWidth: 3, pointRadius: 2 },
+                    { label: 'อุณหภูมิที่ตั้งไว้', data: [], borderColor: '#F59E0B', borderWidth: 2, borderDash: [6, 6], pointRadius: 0, spanGaps: false },
+                    { label: 'สถานการณ์เย็นเร็ว', data: [], borderWidth: 0, pointRadius: 0 },
+                    { label: 'ช่วงสถานการณ์', data: [], borderWidth: 0, pointRadius: 0, backgroundColor: 'rgba(139,92,246,.12)', fill: '-1' },
+                    { label: 'อุณหภูมิคาดการณ์', data: [], borderColor: '#8B5CF6', borderWidth: 2, borderDash: [5, 5], pointRadius: 0 },
+                    { label: 'คาดว่าจะถึงเป้าหมาย', data: [], borderColor: '#7C3AED', backgroundColor: '#7C3AED', pointRadius: 5, pointHoverRadius: 7, showLine: false }
+                ] }, options: {
+                    responsive: true, maintainAspectRatio: false, animation: false, parsing: false,
+                    plugins: { legend: { display: false }, tooltip: { filter: item => [0, 1, 4, 5].includes(item.datasetIndex), callbacks: {
+                        title: items => SmartCoolingForecastClient.clockTime(items[0].parsed.x, coolingForecast.nowOnServer()),
+                        label: item => `${item.dataset.label}: ${item.parsed.y.toFixed(1)}°C`
+                    } } },
+                    scales: {
+                        x: { type: 'linear', grid: { display: false }, ticks: { maxTicksLimit: 6, color: '#64748B', callback: value => new Date(value).toLocaleTimeString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }) } },
+                        y: { grace: '15%', grid: { color: '#F1F5F9' }, ticks: { color: '#64748B', callback: value => value + '°C' } }
+                    }
+                }
             });
         }
         function appendChartPoint(force = false) {
-            if (!chart || !isFreshSensor('temp')) return;
-            const now = Date.now();
-            if (!force && now - state.chartLastAt < 30000) return;
-            state.chartLastAt = now;
-            chart.data.labels.push(new Date().toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }));
-            chart.data.datasets[0].data.push(state.roomTemp);
-            chart.data.datasets[1].data.push(state.ac.power === true ? state.ac.temp : null);
-            if (chart.data.labels.length > 25) { chart.data.labels.shift(); chart.data.datasets.forEach(d => d.data.shift()) }
-            chart.update('none');
+            recordForecastSample();
+            if (!isFreshSensor('temp')) return;
+            const time = state.sensorAt.temp;
+            if (!force && time - state.chartLastAt < 30000) return;
+            state.chartLastAt = time;
+            const sample = { time, temp: state.roomTemp, target: state.ac.power === true ? state.ac.temp : null };
+            if (temperatureHistory.at(-1)?.time === time) temperatureHistory[temperatureHistory.length - 1] = sample;
+            else temperatureHistory.push(sample);
+            while (temperatureHistory.length > 40 || (temperatureHistory.length && time - temperatureHistory[0].time > 15 * 60000)) temperatureHistory.shift();
         }
         function resetChart() {
-            state.chartLastAt = 0;
-            if (chart) { chart.data.labels = []; chart.data.datasets.forEach(d => d.data = []); chart.update('none') }
+            state.chartLastAt = 0; temperatureHistory.length = 0; targetHistory.length = 0; coolingForecast.reset();
+            if (chart) { chart.data.datasets.forEach(d => d.data = []); chart.coolingTimes = null; chart.update('none'); }
         }
         function toggleDemoMode() {
             voiceController.stop();
@@ -1125,7 +1269,7 @@
                     ? 'btn-press text-xs font-semibold px-3.5 py-2 rounded-full border border-emerald-500 bg-emerald-600 text-white shadow-sm flex items-center gap-1.5'
                     : 'btn-press text-xs font-semibold px-3.5 py-2 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 flex items-center gap-1.5';
                 wakeDot.className = `w-2 h-2 rounded-full ${alwaysOnWakeMode ? 'bg-white animate-ping' : 'bg-slate-400'}`;
-                wakeTxt.textContent = `ฟังคำสั่งต่อเนื่อง: ${alwaysOnWakeMode ? 'เปิดอยู่' : 'ปิด'}`;
+                wakeTxt.textContent = `โหมดเรียก Engi: ${alwaysOnWakeMode ? 'เปิดอยู่' : 'ปิด'}`;
             }
 
             if (!btn) return;
@@ -1148,25 +1292,23 @@
         }
 
         const voiceLabels = {
-            OFF: '🎤 กดเพื่อพูด', INIT: 'กำลังเตรียมไมค์...',
-            WAIT_WAKE: 'พูดคำสั่งแอร์สั้น ๆ...', CAPTURE_WAKE: 'กำลังรับคำสั่ง...',
-            PROCESSING_WAKE: 'โมเดลในเครื่องกำลังประมวลผล...', READY: 'กำลังขานรับ...',
+            OFF: '🎤 กดเพื่อพูด', INIT: 'กำลังเตรียมโมเดล...',
+            WAIT_CONTINUOUS: 'รอเรียก Engi / เอ็นจี้...', READY: 'พูดได้เลย...',
             WAIT_COMMAND: 'พูดคำสั่งได้เลย...', CAPTURE_COMMAND: 'กำลังรับคำสั่ง...',
-            PROCESSING_COMMAND: 'กำลังประมวลผล...', WAIT_DEVICE: 'รอสถานะจาก ESP32...',
-            ACKNOWLEDGING: 'กำลังขานรับ...', FEEDBACK: 'ESP32 ตอบแล้ว', SPEAKING: 'กำลังพูดตอบกลับ...'
+            PROCESSING_COMMAND: 'กำลังฟังและประมวลผล...', DRAINING: 'กำลังรับประโยคถัดไป...', SPEAKING: 'กำลังพูดตอบกลับ...'
         };
         const voiceController = new SmartVoiceController({
             fetch: (...args) => fetch(...args), id: () => crypto.randomUUID(),
             audio: callbacks => new SmartVoiceAudio.VoiceAudio(callbacks), wav: SmartVoiceAudio.wav,
             device: () => JSON.stringify([settings.mqttUrl, settings.command, state.demo]),
             current: () => ({ ...currentDesired() }), revision: () => state.requestCount, pending: () => !!state.pending,
-            send: sendAcCommand, notice, log: logEvent, feedback: SmartVoiceFeedback.describe, wakeReplies: SmartVoiceFeedback.wakeReplies,
+            send: sendAcCommand, notice, log: logEvent, feedback: SmartVoiceFeedback.describe, variant: SmartVoiceFeedback.variant,
             render: (phase, handsFree, label) => {
                 alwaysOnWakeMode = !!handsFree;
-                const listening = ['WAIT_WAKE', 'CAPTURE_WAKE', 'WAIT_COMMAND', 'CAPTURE_COMMAND'].includes(phase);
+                const listening = ['WAIT_CONTINUOUS', 'WAIT_COMMAND', 'CAPTURE_COMMAND'].includes(phase);
                 updateVoiceButtonUI(phase === 'OFF' ? 'IDLE' : listening ? 'LISTENING' : 'PROCESSING', label || voiceLabels[phase]);
                 $('btn-wake-toggle').setAttribute('aria-pressed', String(!!handsFree));
-                $('btn-voice-cmd').setAttribute('aria-busy', String(['INIT', 'ACKNOWLEDGING', 'PROCESSING_WAKE', 'PROCESSING_COMMAND', 'SPEAKING'].includes(phase)));
+                $('btn-voice-cmd').setAttribute('aria-busy', String(['INIT', 'PROCESSING_COMMAND', 'SPEAKING'].includes(phase)));
                 $('btn-voice-cmd').title = phase === 'OFF' ? 'กดเพื่อพูดคำสั่ง' : 'กดเพื่อยกเลิกการรับคำสั่งเสียง';
             }
         });
@@ -1177,7 +1319,7 @@
             permission: () => navigator.permissions.query({ name: 'microphone' })
         });
         function toggleAlwaysOnWakeMode() {
-            if (voiceController.handsFree) { handsFreeStartup.stopByUser(); notice('ปิดฟังคำสั่งต่อเนื่องแล้ว', 'info', 3000); }
+            if (voiceController.handsFree) { handsFreeStartup.stopByUser(); notice('ปิดโหมดเรียก Engi แล้ว', 'info', 3000); }
             else void handsFreeStartup.startByUser();
         }
         function handleVoiceButtonClick() {

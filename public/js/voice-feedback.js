@@ -1,8 +1,15 @@
 (function (root) {
     'use strict';
     const phrases = {
-        'wake-help': 'มีอะไรให้ช่วยครับ', 'wake-listening': 'ครับ กำลังฟังอยู่ครับ', 'wake-ready': 'ครับ พูดได้เลยครับ',
+        'wake-ready': 'ครับ พูดได้เลยครับ',
         'power-on': 'เปิดแอร์ครับ', 'power-off': 'ปิดแอร์ครับ',
+        'power-on-alt': 'รับทราบครับ เปิดแอร์ครับ', 'power-off-alt': 'รับทราบครับ ปิดแอร์ครับ',
+        'too-long': 'กรุณาพูดคำสั่งให้สั้นลง ไม่เกินสิบสองวินาทีครับ',
+        'ask-temperature': 'ต้องการกี่องศาครับ',
+        'cancelled': 'รับทราบครับ ยังไม่ส่งคำสั่ง',
+        'need-status': 'ยังไม่ทราบอุณหภูมิปัจจุบัน กรุณารอสถานะอุปกรณ์หรือระบุอุณหภูมิครับ',
+        'temp-range': 'ระบบอุปกรณ์ปัจจุบันรองรับอุณหภูมิยี่สิบเอ็ดถึงยี่สิบเจ็ดองศาครับ',
+        'unsupported': 'อุปกรณ์ปัจจุบันยังไม่รองรับคำสั่งสวิงและโหมดนอนครับ',
         'fan-0': 'ปรับพัดลมเป็นอัตโนมัติครับ', 'fan-1': 'ปรับพัดลมเป็นระดับเบาครับ',
         'fan-2': 'ปรับพัดลมเป็นระดับกลางครับ', 'fan-3': 'ปรับพัดลมเป็นระดับแรงครับ',
         'mode-0': 'ปรับเป็นโหมดทำความเย็นครับ', 'mode-1': 'ปรับเป็นโหมดลดความชื้นครับ', 'mode-2': 'ปรับเป็นโหมดพัดลมครับ',
@@ -21,8 +28,11 @@
         if (!clips.length) clips.push(`temp-${next.temp}`);
         return { text: clips.map(key => phrases[key]).join(' '), clips };
     }
-    const wakeReplies = ['wake-help', 'wake-listening', 'wake-ready'].map(key => ({ text: phrases[key], clips: [key] }));
-    const api = { phrases, describe, wakeReplies };
+    function variant(feedback) {
+        const key = feedback.clips[0] + '-alt';
+        return phrases[key] ? { text: phrases[key], clips: [key] } : feedback;
+    }
+    const api = { phrases, describe, variant };
     root.SmartVoiceFeedback = api;
     if (typeof module !== 'undefined') module.exports = api;
 })(typeof window === 'undefined' ? globalThis : window);

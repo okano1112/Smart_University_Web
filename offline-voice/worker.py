@@ -14,24 +14,34 @@ import librosa
 import tensorflow as tf
 
 ROOT = Path(__file__).resolve().parent.parent
-CONFIG = json.loads((ROOT / 'models/ac_voice_model.json').read_text())
+RUNTIME = json.loads((ROOT / 'models/ac_voice_model.json').read_text())
+METADATA = json.loads((ROOT / 'models/ac_command_metadata.json').read_text())
+AUDIO = METADATA['audio_config']
+LABELS = [METADATA['classes'][str(i)]['class_name'] for i in range(len(METADATA['classes']))]
+BACKGROUND = [int(i) for i, entry in METADATA['classes'].items() if entry['mqtt_command'] == 'NONE']
+if len(BACKGROUND) != 1 or AUDIO['target_length'] != round(AUDIO['sample_rate'] * AUDIO['duration']):
+    raise ValueError('Invalid metadata')
+CONFIG = {**RUNTIME, 'samples': AUDIO['target_length'], 'mean': AUDIO['feature_mean'], 'std': AUDIO['feature_std'], 'labels': LABELS}
 
 class Classifier:
     def __init__(self):
+        import hashlib
+        if hashlib.sha256((ROOT / 'models' / CONFIG['file']).read_bytes()).hexdigest() != CONFIG['sha256']:
+            raise ValueError('Model fingerprint differs from configuration')
         self.model = tf.lite.Interpreter(model_path=str(ROOT / 'models' / CONFIG['file']), num_threads=2)
         self.model.allocate_tensors()
         self.input = self.model.get_input_details()[0]
         self.output = self.model.get_output_details()[0]
-        if list(self.input['shape']) != [1, 41, 13, 1] or self.input['dtype'] != np.float32:
+        if list(self.input['shape']) != [1, 1 + AUDIO['target_length'] // AUDIO['hop_length'], AUDIO['n_mfcc'], 1] or self.input['dtype'] != np.float32:
             raise ValueError('Unexpected model input')
         if list(self.output['shape']) != [1, len(CONFIG['labels'])] or self.output['dtype'] != np.float32:
             raise ValueError('Unexpected model output')
 
     def features(self, samples):
         # Training used librosa defaults; lock them explicitly here for reproducibility.
-        features = librosa.feature.mfcc(y=samples, sr=16000, n_mfcc=13,
-            n_fft=512, hop_length=600, win_length=512, window='hann', center=True,
-            pad_mode='constant', power=2.0, n_mels=128, fmin=0.0, fmax=8000.0,
+        features = librosa.feature.mfcc(y=samples, sr=AUDIO['sample_rate'], n_mfcc=AUDIO['n_mfcc'],
+            n_fft=AUDIO['n_fft'], hop_length=AUDIO['hop_length'], win_length=AUDIO['n_fft'], window='hann', center=True,
+            pad_mode='constant', power=2.0, n_mels=RUNTIME['preprocessing']['n_mels'], fmin=0.0, fmax=AUDIO['sample_rate'] / 2,
             htk=False, dct_type=2, norm='ortho', lifter=0, mel_norm='slaney')
         return ((features.T - CONFIG['mean']) / (CONFIG['std'] + 1e-6)).astype(np.float32)[None, ..., None]
 
@@ -43,7 +53,7 @@ class Classifier:
 
     def classify(self, data):
         with wave.open(io.BytesIO(data), 'rb') as wav:
-            if (wav.getnchannels(), wav.getsampwidth(), wav.getframerate(), wav.getcomptype()) != (1, 2, 16000, 'NONE'):
+            if (wav.getnchannels(), wav.getsampwidth(), wav.getframerate(), wav.getcomptype()) != (1, 2, AUDIO['sample_rate'], 'NONE'):
                 raise ValueError('Expected mono 16 kHz PCM16 WAV')
             if not 800 <= wav.getnframes() <= 240000:
                 raise ValueError('Invalid audio duration')
@@ -56,7 +66,7 @@ class Classifier:
         # Preserve an already-sized training window: re-trimming/re-centering it
         # changes MFCC timing. Only remove VAD padding when the window is too long.
         if len(samples) > CONFIG['samples']:
-            samples, _ = librosa.effects.trim(samples, top_db=25)
+            samples, _ = librosa.effects.trim(samples, top_db=RUNTIME['preprocessing']['top_db_trim'])
         if len(samples) > CONFIG['samples']:
             return {'accepted': False, 'reason': 'too_long'}
         if len(samples) < 1600:
@@ -68,9 +78,9 @@ class Classifier:
             raise ValueError('Invalid model result')
         order = np.argsort(scores)
         index = int(order[-1]); confidence = float(scores[index]); margin = confidence - float(scores[order[-2]])
-        accepted = index != 6 and confidence >= CONFIG['threshold'] and margin >= CONFIG['margin']
+        accepted = index not in BACKGROUND and confidence >= CONFIG['threshold'] and margin >= CONFIG['margin']
         return {'accepted': accepted, 'label': CONFIG['labels'][index],
-            'confidence': confidence, 'margin': margin, 'reason': 'matched' if accepted else 'uncertain'}
+            'confidence': confidence, 'margin': margin, 'reason': 'matched' if accepted else 'background' if index in BACKGROUND else 'uncertain'}
 
 
 def main():

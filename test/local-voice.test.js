@@ -7,11 +7,11 @@ const { LocalVoice } = require('../offline-voice');
 const { wav } = require('../public/js/voice-audio');
 
 test('real local TFLite worker: command fixtures, silence, invalid audio, cancellation and recovery', { timeout: 100000 }, async () => {
-  const worker = new LocalVoice();
+  const worker = new LocalVoice({engine:'tflite'});
   try {
     await worker.start();
     const signal = new AbortController().signal;
-    for (const [file, label] of [['on.wav', '0_ON'], ['off.wav', '1_OFF']]) {
+    for (const [file, label] of [['on.wav', '00_POWER_ON'], ['off.wav', '01_POWER_OFF'], ['temp25.wav', '11_SET_25']]) {
       const data = fs.readFileSync(path.join(__dirname, 'fixtures/local-voice', file));
       const result = await worker.classify(data, signal);
       assert.equal(result.accepted, true); assert.equal(result.label, label);
@@ -22,7 +22,7 @@ test('real local TFLite worker: command fixtures, silence, invalid audio, cancel
       assert.deepEqual(encoded, data);
       assert.equal((await worker.classify(encoded, signal)).label, label);
     }
-    const silent = Buffer.from(await (await wav(new Float32Array(24000))).arrayBuffer());
+    const silent = Buffer.from(await (await wav(new Float32Array(32000))).arrayBuffer());
     assert.equal((await worker.classify(silent, signal)).reason, 'silence');
     await assert.rejects(worker.classify(Buffer.from('not a wav'), signal), error => error.status === 400);
     const cancel = new AbortController(); cancel.abort();

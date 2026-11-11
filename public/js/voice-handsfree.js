@@ -23,7 +23,7 @@
                 if (!this.enabled) return;
                 if (this.permissionStatus?.state === 'denied') {
                     this.controller.stop(); this.awaitingGesture = false;
-                    this.controller.setState('OFF', 'กรุณาอนุญาตไมโครโฟนเพื่อเรียก Engi');
+                    this.controller.setState('OFF', 'กรุณาอนุญาตไมโครโฟนเพื่อใช้คำสั่งเสียง');
                 } else if (this.permissionStatus?.state === 'granted') { this.resumePending = true; this.scheduleRestore(); }
             };
         }
@@ -51,7 +51,7 @@
         stopByUser() { this.setEnabled(false); this.controller.stop(); }
         waitForGesture() {
             this.awaitingGesture = true;
-            this.controller.setState('OFF', 'แตะหน้าจอครั้งเดียวเพื่อเปิด Engi');
+            this.controller.setState('OFF', 'แตะหน้าจอครั้งเดียวเพื่อเปิดรับคำสั่งเสียง');
         }
         async restore() {
             if (!this.enabled || this.document.hidden || this.checking || this.starting || this.controller.state !== 'OFF') return;
@@ -72,7 +72,7 @@
                 if (version !== this.version || !this.enabled || this.document.hidden || this.controller.state !== 'OFF') return;
                 if (permission === 'denied') {
                     this.awaitingGesture = false;
-                    this.controller.setState('OFF', 'กรุณาอนุญาตไมโครโฟนเพื่อเรียก Engi');
+                    this.controller.setState('OFF', 'กรุณาอนุญาตไมโครโฟนเพื่อใช้คำสั่งเสียง');
                 } else if (permission === 'granted') await this.attempt(true);
                 else this.waitForGesture();
             } finally { this.checking = false; if (this.resumePending && this.enabled && !this.document.hidden) this.scheduleRestore(); }

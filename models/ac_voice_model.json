@@ -1,13 +1,12 @@
 {
   "file": "ac_voice_model_int8.tflite",
-  "sampleRate": 16000,
-  "samples": 24000,
-  "mfcc": 13,
-  "fft": 512,
-  "hop": 600,
-  "mean": -35.077686,
-  "std": 143.896851,
-  "labels": ["0_ON", "1_OFF", "2_TEMP_UP", "3_TEMP_DOWN", "4_PRESET_TURBO", "5_PRESET_ECO", "6_BACKGROUND"],
-  "threshold": 0.90,
-  "margin": 0.25
+  "sha256": "eaf4abffb567ff59c584d22ec083c39d7a85bcf654ca44f9409a4a56b7829e25",
+  "threshold": 0.9,
+  "margin": 0.25,
+  "preprocessing": {
+    "center": true,
+    "padding": "center",
+    "n_mels": 128,
+    "top_db_trim": 25
+  }
 }

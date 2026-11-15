@@ -22,6 +22,20 @@ npm start
 
 ### ติดตั้ง Engi บน Windows
 
+บน Windows x64 เปิด PowerShell ในโฟลเดอร์โปรเจกต์ที่มี `package.json` แล้วรัน
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1
+```
+
+สคริปต์ตรวจและติดตั้ง Node.js, npm, Visual C++ Runtime, Python 3.12, ไลบรารีของเว็บและระบบเสียง แล้วดาวน์โหลดโมเดลเมื่อไฟล์ยังมาไม่ครบ ใช้ตัวติดตั้งจาก Node.js, Microsoft และ Python.org พร้อมตรวจ checksum หรือ digital signature ก่อนรัน Windows อาจขอสิทธิ์ผู้ดูแลเมื่อติดตั้ง Node.js หรือ Visual C++ Runtime
+
+รายการที่พร้อมแล้วจะแสดง `[skip]` ถ้า `.venv-voice` เดิมใช้ Python คนละรุ่นหรือเปิดไม่ได้ สคริปต์จะย้ายไปเก็บใต้ `.venv-voice-backups/` แล้วสร้างใหม่ สคริปต์ทดสอบโหลด Whisper จริงก่อนเปิดเว็บ ถ้าบัญชี Login ยังไม่มี จะให้ตั้งชื่อผู้ใช้และรหัสผ่านใน PowerShell
+
+รันคำสั่งเดิมซ้ำได้หลังแก้ข้อผิดพลาดหรือรีสตาร์ต Windows หากต้องการติดตั้งและตรวจความพร้อมอย่างเดียว ให้เติม `-SetupOnly` ท้ายคำสั่ง เมื่อเว็บพร้อม ให้ล็อกอินที่ `http://127.0.0.1:3000/` และอนุญาตไมโครโฟนในเบราว์เซอร์ การเปิดผ่าน Cloudflare ให้ใช้ค่าของ Tunnel ตาม [คู่มือ Login](../LOGIN.md)
+
+#### ติดตั้งเองทีละขั้น
+
 ติดตั้ง Node.js และ Python 3.12 แบบ x64 บนเครื่อง Windows แล้วเปิด PowerShell ที่โฟลเดอร์โปรเจกต์ Python 3.12 ติดตั้งคู่กับ Python 3.15 ได้ สำหรับ Engi ให้ใช้ 3.12 เพราะ `onnxruntime` ที่ `faster-whisper` ต้องใช้ยังไม่มี wheel สำหรับ CPython 3.15 บน Windows x64 [รายการไฟล์ ONNX Runtime](https://pypi.org/project/onnxruntime/#files)
 
 ถ้าใช้ Python Install Manager ให้รัน `pymanager install 3.12` ถ้ายังไม่มี Install Manager ใช้ [ตัวติดตั้ง Python 3.12.10 สำหรับ Windows x64](https://www.python.org/downloads/release/python-31210/#files) และเลือกติดตั้ง Python Launcher จากนั้นเปิด PowerShell ใหม่และตรวจด้วย `py -3.12 --version` ถ้าเคยสร้าง `.venv-voice` ด้วย Python รุ่นอื่น ให้เปลี่ยนชื่อโฟลเดอร์เดิมก่อนสร้างใหม่ [คู่มือ Python บน Windows](https://docs.python.org/3.12/using/windows.html#the-python-launcher-for-windows)

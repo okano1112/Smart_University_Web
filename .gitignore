@@ -1,5 +1,6 @@
 
 .venv-voice/
+.venv-voice-backups/
 node-red/runtime/
 data/ac-schedules.json
 data/ac-schedules.json.*.tmp

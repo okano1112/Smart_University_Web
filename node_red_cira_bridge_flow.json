@@ -1,0 +1,398 @@
+[
+  {
+    "id": "c1a5402000000001",
+    "type": "tab",
+    "label": "CiRA CORE → Classroom Web",
+    "disabled": false,
+    "info": "Receives CiRA CORE counts from broker.emqx.io:1883, spu/classroom/room/person. Validates counts and forwards nonretained telemetry to the existing web topic. No AC commands or automatic control. Keep only one copy of this bridge active.",
+    "env": [
+      {
+        "name": "CIRA_OUTPUT_TOPIC",
+        "value": "spu/classroom/cira",
+        "type": "str"
+      },
+      {
+        "name": "CIRA_MAX_AGE_SECONDS",
+        "value": "30",
+        "type": "num"
+      },
+      {
+        "name": "CIRA_MIN_CONFIDENCE",
+        "value": "0.5",
+        "type": "num"
+      }
+    ]
+  },
+  {
+    "id": "c1a5402000000002",
+    "type": "mqtt-broker",
+    "name": "CiRA / Web • broker.emqx.io",
+    "broker": "broker.emqx.io",
+    "port": "1883",
+    "clientid": "",
+    "autoConnect": true,
+    "usetls": false,
+    "protocolVersion": "4",
+    "keepalive": "30",
+    "cleansession": true,
+    "autoUnsubscribe": true,
+    "birthTopic": "",
+    "birthQos": "0",
+    "birthPayload": "",
+    "birthMsg": {},
+    "closeTopic": "",
+    "closeQos": "0",
+    "closePayload": "",
+    "closeMsg": {},
+    "willTopic": "",
+    "willQos": "0",
+    "willPayload": "",
+    "willMsg": {}
+  },
+  {
+    "id": "c1a5402000000010",
+    "type": "comment",
+    "z": "c1a5402000000001",
+    "name": "CiRA MQTT → ตรวจจำนวนคน → เว็บเดิม",
+    "info": "CiRA publishes {\"total_people\":2} to spu/classroom/room/person every 1–5 seconds, retain=false. Web listens to spu/classroom/cira on WSS port 8084. MQTT input and output use the same broker; input/output topics must differ.",
+    "x": 310,
+    "y": 60,
+    "wires": []
+  },
+  {
+    "id": "c1a5402000000003",
+    "type": "mqtt in",
+    "z": "c1a5402000000001",
+    "name": "CiRA • spu/classroom/room/person",
+    "topic": "spu/classroom/room/person",
+    "qos": "0",
+    "datatype": "utf8",
+    "broker": "c1a5402000000002",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 215,
+    "y": 150,
+    "wires": [
+      [
+        "c1a5402000000004"
+      ]
+    ]
+  },
+  {
+    "id": "c1a5402000000004",
+    "type": "function",
+    "z": "c1a5402000000001",
+    "name": "ตรวจข้อมูล CiRA + freshness",
+    "func": "const normalizeCira = function normalizeCira(payload, options = {}) {\n  let now, source, retained, maxPeople, maxAgeMs, minConfidence;\n  const fail = (code, reason) => ({ ok: false, code, reason });\n  const has = (object, key) => Object.prototype.hasOwnProperty.call(object, key);\n  const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);\n  const countValue = value => {\n    if (typeof value === 'string') {\n      const text = value.trim();\n      if (!/^\\d+(?:\\.\\d+)?$/.test(text)) return null;\n      value = Number(text);\n    }\n    return typeof value === 'number' && Number.isSafeInteger(value)\n      && value >= 0 && value <= maxPeople ? value : null;\n  };\n  const timeValue = value => {\n    if (typeof value === 'string') {\n      // Require an ISO instant with an explicit timezone; numeric strings are\n      // counts only and are not guessed to be epoch seconds or milliseconds.\n      const parts = /^(\\d{4})-(\\d{2})-(\\d{2})T(\\d{2}):(\\d{2}):(\\d{2})(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$/i.exec(value);\n      if (!parts) return null;\n      const [year, month, day, hour, minute, second] = parts.slice(1).map(Number);\n      const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);\n      const monthDays = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];\n      if (month < 1 || month > 12 || day < 1 || day > monthDays[month - 1]\n        || hour > 23 || minute > 59 || second > 59) return null;\n      value = Date.parse(value);\n    }\n    return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null;\n  };\n  const detectionsCount = items => {\n    if (!Array.isArray(items)) return fail('INVALID_DETECTIONS', 'detections/objects ต้องเป็นรายการวัตถุ');\n    let count = 0;\n    for (const item of items) {\n      if (!isObject(item)) return fail('INVALID_DETECTIONS', 'รายการตรวจจับต้องมีชื่อวัตถุทุกตัว');\n      const labels = ['label', 'name', 'class_name', 'className']\n        .filter(key => has(item, key)).map(key => item[key]);\n      if (!labels.length || labels.some(value => typeof value !== 'string' || !value.trim())) {\n        return fail('INVALID_DETECTIONS', 'รายการตรวจจับขาดชื่อวัตถุที่รองรับ');\n      }\n      const normalizedLabels = labels.map(value => value.trim().toLowerCase());\n      if (normalizedLabels.some(value => value !== normalizedLabels[0])) {\n        return fail('INVALID_DETECTIONS', 'ชื่อวัตถุในรายการเดียวกันขัดแย้งกัน');\n      }\n      const scores = ['confidence', 'score'].filter(key => has(item, key)).map(key => item[key]);\n      if (scores.some(value => typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1)\n        || scores.some(value => value !== scores[0])) {\n        return fail('INVALID_DETECTIONS', 'ค่าความมั่นใจต้องอยู่ระหว่าง 0 ถึง 1 และไม่ขัดแย้งกัน');\n      }\n      if (normalizedLabels[0] === 'person' && (!scores.length || scores[0] >= minConfidence)) count++;\n      if (count > maxPeople) return fail('INVALID_COUNT', 'จำนวนคนเกินขอบเขตที่กำหนด');\n    }\n    return { ok: true, count };\n  };\n\n  try {\n    if (!isObject(options)) return fail('INVALID_OPTIONS', 'ค่าตั้งต้นต้องเป็นวัตถุ');\n    ({ now = Date.now(), source = 'mqtt', retained = false,\n      maxPeople = 1000, maxAgeMs = 30000, minConfidence = 0.5 } = options);\n    if (retained === true) return fail('RETAINED', 'ไม่รับข้อความ MQTT ที่เก็บค้างไว้เป็นข้อมูลกล้องปัจจุบัน');\n    if (!Number.isSafeInteger(now) || now <= 0 || !Number.isFinite(new Date(now).getTime())\n      || !Number.isSafeInteger(maxPeople) || maxPeople < 0\n      || typeof maxAgeMs !== 'number' || !Number.isFinite(maxAgeMs) || maxAgeMs < 0\n      || typeof minConfidence !== 'number' || !Number.isFinite(minConfidence) || minConfidence < 0 || minConfidence > 1) {\n      return fail('INVALID_OPTIONS', 'ค่าตั้งต้นเวลา จำนวนคน หรือความมั่นใจไม่ถูกต้อง');\n    }\n\n    const cleanSource = typeof source === 'string'\n      ? source.trim().replace(/[^A-Za-z0-9._:-]/g, '_').slice(0, 50) || 'mqtt'\n      : 'mqtt';\n    let value = payload;\n    if (typeof Buffer !== 'undefined' && typeof Buffer.isBuffer === 'function' && Buffer.isBuffer(value)) {\n      value = value.toString('utf8');\n    }\n    if (typeof value === 'string') {\n      const text = value.trim();\n      if (!text) return fail('EMPTY_PAYLOAD', 'ข้อความจำนวนคนว่าง');\n      if (/^\\d+(?:\\.\\d+)?$/.test(text)) value = text;\n      else {\n        try { value = JSON.parse(text); }\n        catch (_) { return fail('INVALID_JSON', 'ข้อความไม่ใช่ตัวเลขหรือ JSON ที่ถูกต้อง'); }\n      }\n    }\n\n    let count;\n    let timestamp = now, sampleTimeSource = 'received';\n    if (typeof value === 'number' || typeof value === 'string') {\n      count = countValue(value);\n      if (count === null) return fail('INVALID_COUNT', 'จำนวนคนต้องเป็นจำนวนเต็มตั้งแต่ 0 ถึงค่าที่กำหนด');\n    } else if (isObject(value)) {\n      const samples = ['timestamp', 'captured_at'].filter(key => has(value, key)).map(key => timeValue(value[key]));\n      if (samples.some(sample => sample === null)) return fail('INVALID_TIMESTAMP', 'เวลาเก็บภาพต้องเป็น epoch มิลลิวินาทีหรือ ISO พร้อมเขตเวลา');\n      if (samples.some(sample => sample !== samples[0])) return fail('TIMESTAMP_CONFLICT', 'เวลาเก็บภาพในข้อความขัดแย้งกัน');\n      if (samples.length) { timestamp = samples[0]; sampleTimeSource = 'camera'; }\n\n      const counts = ['total_people', 'people', 'person_count']\n        .filter(key => has(value, key)).map(key => value[key]);\n      if (has(value, 'counts') && isObject(value.counts) && has(value.counts, 'person')) counts.push(value.counts.person);\n      if (counts.length) {\n        const parsedCounts = counts.map(countValue);\n        if (parsedCounts.some(number => number === null)) return fail('INVALID_COUNT', 'จำนวนคนต้องเป็นจำนวนเต็มตั้งแต่ 0 ถึงค่าที่กำหนด');\n        if (parsedCounts.some(number => number !== parsedCounts[0])) return fail('COUNT_CONFLICT', 'ฟิลด์จำนวนคนในข้อความขัดแย้งกัน');\n        count = parsedCounts[0];\n      } else {\n        const arrays = ['detections', 'objects'].filter(key => has(value, key));\n        if (!arrays.length) return fail('UNSUPPORTED_SCHEMA', 'ไม่พบฟิลด์จำนวนคนหรือรายการตรวจจับที่รองรับ');\n        const results = arrays.map(key => detectionsCount(value[key]));\n        const invalid = results.find(result => !result.ok);\n        if (invalid) return invalid;\n        if (results.some(result => result.count !== results[0].count)) {\n          return fail('DETECTION_CONFLICT', 'จำนวนคนจาก detections และ objects ขัดแย้งกัน');\n        }\n        count = results[0].count;\n      }\n    } else return fail('INVALID_PAYLOAD', 'ข้อความต้องเป็นตัวเลขหรือวัตถุ JSON ที่รองรับ');\n\n    if (now - timestamp > maxAgeMs) return fail('STALE_SAMPLE', 'ข้อมูลกล้องเก่าเกินช่วงเวลาที่กำหนด');\n    if (timestamp - now > 5000) return fail('FUTURE_SAMPLE', 'เวลาเก็บภาพอยู่ในอนาคตเกิน 5 วินาที');\n    return {\n      ok: true,\n      ...(options.includeProvenance === true ? { sampleTimeSource } : {}),\n      data: { total_people: count, source: cleanSource, timestamp, received_at: new Date(now).toISOString() }\n    };\n  } catch (_) {\n    return fail('INVALID_PAYLOAD', 'อ่านข้อความกล้องไม่ได้');\n  }\n};\nconst newCiraLog = function newCiraLog(now) {\n    return {\n        runId: now.toString(36) + '-' + Math.random().toString(36).slice(2, 8),\n        sequence: 0, lastSample: {}, events: [],\n        counters: { received: 0, forwarded: 0, rejected: 0, tests: 0 }\n    };\n};\nconst recordCiraLog = function recordCiraLog(log, outcome, now, details = {}) {\n    if (outcome === 'forwarded' || outcome === 'rejected') {\n        log.counters.received++;\n        log.counters[outcome]++;\n    } else if (outcome === 'test') log.counters.tests++;\n\n    // Keep precise totals, but sample traces/debug independently per outcome.\n    // Clock adjustments cannot suppress an entire bucket until wall time catches up.\n    const previous = log.lastSample[outcome];\n    if (outcome !== 'stale' && previous !== undefined && now >= previous && now - previous < 1000) return false;\n    log.lastSample[outcome] = now;\n    const frameId = outcome === 'forwarded' || outcome === 'rejected' ? 'cira-' + log.runId + '-' + (log.sequence + 1) : null;\n    const event = (stage, level, at, message, extra = {}) => {\n        log.events.push({ id: 'cira-' + log.runId + '-event-' + ++log.sequence, ...(frameId ? { frameId } : {}),\n            source: 'cira', stage, level, at, message, details: extra });\n    };\n    if (frameId) event('capture', 'info', now, 'ได้รับข้อความผลตรวจจับบน MQTT จาก CiRA CORE');\n    if (outcome === 'forwarded') {\n        const sample = { totalPeople: details.totalPeople, sampleAt: details.sampleAt, sampleTimeSource: details.sampleTimeSource };\n        const validatedAt = Math.max(now, details.validatedAt);\n        event('validate', 'info', validatedAt, 'ตรวจและสรุปจำนวนคนแล้ว', { ...sample, latencyMs: validatedAt - now });\n        event('forward', 'info', validatedAt, 'ส่งต่อไปยังโหนด MQTT output แล้ว', sample);\n    } else if (outcome === 'rejected') {\n        event('rejected', 'warning', Math.max(now, details.validatedAt), details.reason, { code: details.code });\n    } else if (outcome === 'test') {\n        if (details.code) event('test', 'warning', now, details.reason, { code: details.code });\n        else event('test', 'info', now, 'ตรวจตัวอย่างใน Node-RED เท่านั้น ไม่ส่ง MQTT', { totalPeople: details.totalPeople });\n    } else if (outcome === 'stale') {\n        event('stale', 'warning', now, 'ยังไม่มีผลตรวจจับล่าสุดจาก CiRA CORE', { lastSeen: details.lastSeen });\n    }\n    // Evict entire frame traces so the first visible stage is never missing.\n    while (log.events.length > 60) {\n        const { frameId: oldestFrame } = log.events.shift();\n        while (oldestFrame && log.events[0]?.frameId === oldestFrame) log.events.shift();\n    }\n    return true;\n};\nconst now = Date.now();\nconst observe = (outcome, details) => {\n    const log = flow.get('ciraObservabilityV1') || newCiraLog(now);\n    const sampled = recordCiraLog(log, outcome, now, details);\n    flow.set('ciraObservabilityV1', log);\n    return sampled;\n};\nconst numberSetting = (name,fallback) => {\n    const value=env.get(name);\n    return value === undefined || value === null || value === '' ? fallback : Number(value);\n};\nconst maxAgeMs = numberSetting('CIRA_MAX_AGE_SECONDS',30) * 1000;\nif (msg._ciraWatchdog === true) {\n    const last = context.get('lastValidAt');\n    if (!last || now - last > maxAgeMs) {\n        node.status({fill:'red',shape:'ring',text:'รอข้อมูล CiRA ล่าสุด'});\n        if (!context.get('staleShown')) {\n            context.set('staleShown',true);\n            observe('stale', { lastSeen: last || null });\n            return [null,{payload:{event:'cira_stale',lastSeen:last || null}}];\n        }\n    }\n    return null;\n}\nconst outputTopic = String(env.get('CIRA_OUTPUT_TOPIC') || 'spu/classroom/cira');\nconst reject = (code,reason) => {\n    node.status({fill:'yellow',shape:'ring',text:reason});\n    const sampled = observe(msg._ciraTest === true ? 'test' : 'rejected', {code,reason,validatedAt:Date.now()});\n    return [null,sampled ? {payload:{event:'cira_rejected',code,reason}} : null];\n};\nif (!outputTopic || /[+#\\u0000]/.test(outputTopic) || outputTopic === msg.topic) return reject('topic_loop','Topic รับและส่งต้องต่างกัน');\nconst result = normalizeCira(msg.payload,{\n    now,source:'cira-core',retained:msg.retain === true,maxAgeMs,\n    minConfidence:numberSetting('CIRA_MIN_CONFIDENCE',.5),includeProvenance:true\n});\nif (!result.ok) return reject(result.code,result.reason);\nif (msg._ciraTest === true) {\n    const sampled = observe('test', {totalPeople:result.data.total_people});\n    return [null,sampled ? {payload:{event:'cira_test_only',wouldPublishTo:outputTopic,data:result.data}} : null];\n}\nconst sampled = observe('forwarded', { totalPeople:result.data.total_people,\n    sampleAt:result.data.timestamp,sampleTimeSource:result.sampleTimeSource,validatedAt:Date.now() });\ncontext.set('lastValidAt',now);context.set('staleShown',false);\nnode.status({fill:'green',shape:'dot',text:'CiRA: '+result.data.total_people+' คน'});\nreturn [{topic:outputTopic,payload:JSON.stringify(result.data),qos:0,retain:false},\n    sampled ? {payload:{event:'cira_forwarded',topic:outputTopic,total_people:result.data.total_people,at:result.data.received_at}} : null];",
+    "outputs": 2,
+    "timeout": 1,
+    "noerr": 0,
+    "initialize": "context.set('lastValidAt',0);context.set('staleShown',false);flow.set('ciraObservabilityV1',(function newCiraLog(now) {\n    return {\n        runId: now.toString(36) + '-' + Math.random().toString(36).slice(2, 8),\n        sequence: 0, lastSample: {}, events: [],\n        counters: { received: 0, forwarded: 0, rejected: 0, tests: 0 }\n    };\n})(Date.now()));node.status({fill:'grey',shape:'ring',text:'รอ CiRA CORE'});",
+    "finalize": "",
+    "libs": [],
+    "x": 570,
+    "y": 150,
+    "wires": [
+      [
+        "c1a5402000000005"
+      ],
+      [
+        "c1a5402000000006"
+      ]
+    ]
+  },
+  {
+    "id": "c1a5402000000005",
+    "type": "mqtt out",
+    "z": "c1a5402000000001",
+    "name": "จำนวนคน → เว็บ (nonretained)",
+    "topic": "",
+    "qos": "0",
+    "retain": "false",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
+    "broker": "c1a5402000000002",
+    "x": 925,
+    "y": 120,
+    "wires": []
+  },
+  {
+    "id": "c1a5402000000006",
+    "type": "debug",
+    "z": "c1a5402000000001",
+    "name": "CiRA bridge events",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 920,
+    "y": 205,
+    "wires": []
+  },
+  {
+    "id": "c1a5402000000007",
+    "type": "inject",
+    "z": "c1a5402000000001",
+    "name": "ตรวจข้อมูลขาดหาย (ทุก 5 วินาที)",
+    "props": [
+      {
+        "p": "_ciraWatchdog",
+        "v": "true",
+        "vt": "bool"
+      }
+    ],
+    "repeat": "5",
+    "crontab": "",
+    "once": true,
+    "onceDelay": "2",
+    "x": 220,
+    "y": 225,
+    "wires": [
+      [
+        "c1a5402000000004"
+      ]
+    ]
+  },
+  {
+    "id": "c1a5402000000008",
+    "type": "inject",
+    "z": "c1a5402000000001",
+    "name": "ทดสอบ 2 คน • ไม่ส่ง MQTT",
+    "props": [
+      {
+        "p": "payload"
+      },
+      {
+        "p": "topic",
+        "v": "local-test",
+        "vt": "str"
+      },
+      {
+        "p": "_ciraTest",
+        "v": "true",
+        "vt": "bool"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": ".1",
+    "payload": "{\"total_people\":2}",
+    "payloadType": "json",
+    "x": 215,
+    "y": 300,
+    "wires": [
+      [
+        "c1a5402000000004"
+      ]
+    ]
+  },
+  {
+    "id": "c1a5402000000009",
+    "type": "status",
+    "z": "c1a5402000000001",
+    "name": "สถานะ MQTT socket",
+    "scope": [
+      "c1a5402000000003",
+      "c1a5402000000005"
+    ],
+    "x": 565,
+    "y": 375,
+    "wires": [
+      [
+        "c1a5402000000006"
+      ]
+    ]
+  },
+  {
+    "id": "c1a5402000000011",
+    "type": "catch",
+    "z": "c1a5402000000001",
+    "name": "ข้อผิดพลาดของ bridge",
+    "scope": [
+      "c1a5402000000004"
+    ],
+    "uncaught": false,
+    "x": 565,
+    "y": 435,
+    "wires": [
+      [
+        "c1a5402000000006"
+      ]
+    ]
+  },
+  {
+    "id": "c1a5402000000012",
+    "type": "comment",
+    "z": "c1a5402000000001",
+    "name": "แก้ Broker ที่โหนด MQTT / ค่าอื่นที่ Environment ของแท็บ",
+    "info": "CIRA_OUTPUT_TOPIC defaults to spu/classroom/cira. CIRA_MAX_AGE_SECONDS defaults to30. The watchdog reports stale data only; it never republishes old counts and never changes the air conditioner.",
+    "x": 385,
+    "y": 510,
+    "wires": []
+  },
+  {
+    "id": "c1a5402000000013",
+    "type": "http in",
+    "z": "c1a5402000000001",
+    "name": "CiRA logs • localhost",
+    "url": "/cira-observability",
+    "method": "get",
+    "upload": false,
+    "x": 205,
+    "y": 580,
+    "wires": [
+      [
+        "c1a5402000000014"
+      ]
+    ]
+  },
+  {
+    "id": "c1a5402000000014",
+    "type": "function",
+    "z": "c1a5402000000001",
+    "name": "อ่านเหตุการณ์ล่าสุดและยอดรวม",
+    "func": "const now = Date.now();\nmsg.headers = {'content-type':'application/json; charset=utf-8','cache-control':'no-store'};\n// Check the socket peer, not user-controlled forwarding headers.\nif (!['127.0.0.1','::1','::ffff:127.0.0.1'].includes(msg.req?.socket?.remoteAddress)) {\n    msg.statusCode = 403;\n    msg.payload = JSON.stringify({success:false,message:'CiRA logs are available on localhost only'});\n    return msg;\n}\nconst log = flow.get('ciraObservabilityV1');\nmsg.statusCode = 200;\n// Send a JSON string to disable the HTTP response node's JSONP handling.\nmsg.payload = JSON.stringify({source:'cira',serverTime:now,\n    counters:log?.counters || {received:0,forwarded:0,rejected:0,tests:0},events:log?.events || []});\nreturn msg;",
+    "outputs": 1,
+    "timeout": 1,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 565,
+    "y": 580,
+    "wires": [
+      [
+        "c1a5402000000015"
+      ]
+    ]
+  },
+  {
+    "id": "c1a5402000000015",
+    "type": "http response",
+    "z": "c1a5402000000001",
+    "name": "JSON • no-store",
+    "statusCode": "",
+    "headers": {},
+    "x": 920,
+    "y": 580,
+    "wires": []
+  },
+  {
+    "id": "c1a5402000000016",
+    "type": "http in",
+    "z": "c1a5402000000001",
+    "name": "POST pose • localhost",
+    "url": "/cira-pose-frame",
+    "method": "post",
+    "upload": false,
+    "skipBodyParsing": false,
+    "x": 215,
+    "y": 680,
+    "wires": [
+      [
+        "c1a5402000000017"
+      ]
+    ]
+  },
+  {
+    "id": "c1a5402000000017",
+    "type": "function",
+    "z": "c1a5402000000001",
+    "name": "จำแนกท่าทางจาก COCO keypoints",
+    "func": "const handleCiraPose = function handleCiraPose(msg, method, { flow, key, update, now, maxAgeMs, maxBodyBytes }) {\n    const json = (status, data) => {\n        msg.statusCode = status;\n        msg.headers = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' };\n        msg.payload = JSON.stringify(data);\n        return msg;\n    };\n    const error = (status, code) => json(status, { ok: false, code });\n    const req = msg.req;\n    if (method !== 'EXPIRE' && !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req?.socket?.remoteAddress)) return error(403, 'LOCAL_ONLY');\n\n    const record = flow.get(key) || { state: null, activity: null, activityWindow: [], lastCapturedAt: null, lastReceivedAt: null, events: [], sampledAt: {} };\n    const append = (...events) => {\n        record.events = [...record.events, ...events].slice(-20);\n    };\n    const sample = key => {\n        const previous = record.sampledAt[key];\n        if (previous !== undefined && now >= previous && now - previous < 1000) return false;\n        record.sampledAt[key] = now;\n        return true;\n    };\n    const save = () => flow.set(key, record);\n    const stale = () => !record.activity || now - record.activity.captured_at > maxAgeMs || now - record.lastReceivedAt > maxAgeMs;\n    const prune = () => {\n        if (!record.activity || !stale()) return;\n        record.activity = null;\n        record.state = null;\n        record.activityWindow = [];\n        append({ at: now, stage: 'stale' });\n        save();\n    };\n\n    if (method === 'GET') {\n        prune();\n        return json(200, { source: 'cira', serverTime: now, lastReceivedAt: record.lastReceivedAt,\n            stale: stale(), activity: record.activity, activityWindow: record.activityWindow, events: record.events });\n    }\n    if (method === 'EXPIRE') {\n        prune();\n        return null;\n    }\n    if (method !== 'POST') return error(405, 'METHOD');\n\n    // Raw poses are accepted only from a local sender, outside a browser page.\n    // No forwarding header can make a nonloopback socket look local.\n    const headers = req.headers || {};\n    if (headers.origin || headers['sec-fetch-site']) return error(403, 'LOCAL_ONLY');\n    prune();\n    const reject = (status, code) => {\n        if (sample('rejected')) { append({ at: now, stage: 'rejected', code }); save(); }\n        return error(status, code);\n    };\n    if (!/^application\\/json(?:\\s*;|$)/i.test(String(headers['content-type'] || ''))) return reject(415, 'CONTENT_TYPE');\n    if (Number(headers['content-length']) > maxBodyBytes) return reject(413, 'TOO_LARGE');\n    if (!msg.payload || typeof msg.payload !== 'object' || Array.isArray(msg.payload)) return reject(400, 'INVALID_FRAME');\n    if (record.lastCapturedAt !== null && msg.payload.captured_at <= record.lastCapturedAt) return reject(400, 'INVALID_FRAME');\n\n    let result;\n    try {\n        // Content-Length is optional (chunked encoding); check the decoded body too.\n        if (Buffer.byteLength(JSON.stringify(msg.payload), 'utf8') > maxBodyBytes) return reject(413, 'TOO_LARGE');\n        result = update(msg.payload, record.state, { now, maxAgeMs });\n    } catch (_) { return reject(500, 'PROCESSING_ERROR'); }\n    if (!result) return reject(400, 'INVALID_FRAME');\n\n    // Copy a fixed projection; classifier internals can never enter events or HTTP output.\n    const { captured_at, total_people, seated, standing, walking, running, unknown } = result.snapshot;\n    const activity = { total_people, seated, standing, walking, running, unknown };\n    // Hold separate sampled evidence for the comfort advisor, not a frame log.\n    // Both camera and receipt gaps break continuity. A batch of old frames\n    // cannot manufacture an uninterrupted history across a disconnect.\n    if (record.lastCapturedAt === null || captured_at - record.lastCapturedAt > 2600 || now - record.lastReceivedAt > 2600) {\n        record.activityWindow = [];\n    }\n    record.state = result.state;\n    record.activity = { captured_at, ...activity };\n    const lastPoint = record.activityWindow.at(-1);\n    if (!lastPoint || captured_at - lastPoint.captured_at >= 1000) {\n        record.activityWindow = [...record.activityWindow, record.activity].filter(point => captured_at - point.captured_at <= 35000).slice(-36);\n    }\n    record.lastCapturedAt = captured_at;\n    record.lastReceivedAt = now;\n    if (sample('classified')) append({ at: now, stage: 'received' }, { at: now, stage: 'classified', activity });\n    save();\n    return json(200, { ok: true });\n};\nconst update = function updatePoseActivity(frame, previousState = null, options = {}) {\n    const { now = Date.now(), maxAgeMs = 5000 } = options || {};\n    const integerIn = (value, lo, hi) => Number.isSafeInteger(value) && value >= lo && value <= hi;\n    const unit = value => Number.isFinite(value) && value >= 0 && value <= 1;\n    const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);\n    if (!object(frame) || !integerIn(now, 1, 8.64e15) || !integerIn(maxAgeMs, 1, 30000)\n        || !integerIn(frame.captured_at, 1, now) || now - frame.captured_at > maxAgeMs\n        || !integerIn(frame.width, 16, 8192) || !integerIn(frame.height, 16, 8192)\n        || !Array.isArray(frame.people) || frame.people.length > 64) return null;\n    const at = frame.captured_at, aspect = frame.width / frame.height;\n    if (aspect < .25 || aspect > 4 || at <= previousState?.captured_at) return null;\n    const ids = new Set();\n    for (const person of frame.people) {\n        if (!object(person) || typeof person.id !== 'string' || !person.id.trim() || person.id.length > 64 || /[\\u0000-\\u001f\\u007f]/u.test(person.id)\n            || ids.has(person.id) || !Array.isArray(person.keypoints) || person.keypoints.length !== 17) return null;\n        ids.add(person.id);\n        for (const point of person.keypoints) {\n            if (!object(point) || !unit(point.x) || !unit(point.y) || !unit(point.score)) return null;\n        }\n    }\n\n    const snapshot = { captured_at: at, total_people: frame.people.length, seated: 0, standing: 0, walking: 0, running: 0, unknown: 0 };\n    const state = { captured_at: at, width: frame.width, height: frame.height, tracks: [] };\n    const keepTracks = previousState?.width === frame.width && previousState?.height === frame.height\n        && at - previousState.captured_at <= 750 && Array.isArray(previousState.tracks);\n    const prior = new Map(keepTracks ? previousState.tracks.map(track => [track.id, track.observations]) : []);\n\n    const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);\n    const midpoint = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });\n    const median = values => {\n        const sorted = [...values].sort((a, b) => a - b), i = Math.floor(sorted.length / 2);\n        return sorted.length % 2 ? sorted[i] : (sorted[i - 1] + sorted[i]) / 2;\n    };\n    function legFeature(hip, knee, ankle, scale) {\n        const thigh = distance(hip, knee), shin = distance(knee, ankle);\n        if (thigh / scale < .20 || thigh / scale > 2.25 || shin / scale < .20 || shin / scale > 2.25) return null;\n        const dot = (hip.x - knee.x) * (ankle.x - knee.x) + (hip.y - knee.y) * (ankle.y - knee.y);\n        const kneeAngle = Math.acos(Math.max(-1, Math.min(1, dot / (thigh * shin)))) * 180 / Math.PI;\n        return {\n            standing: kneeAngle >= 150 && (ankle.y - hip.y) / (thigh + shin) >= .76,\n            seated: kneeAngle >= 55 && kneeAngle <= 132 && Math.abs(knee.y - hip.y) / thigh <= .48\n                && (ankle.y - knee.y) / shin >= .65,\n            ankleBelowHip: (ankle.y - hip.y) >= .20 * scale\n        };\n    }\n    function observe(person) {\n        const point = i => ({ x: person.keypoints[i].x * aspect, y: person.keypoints[i].y });\n        // Require both shoulders, hips, knees and ankles for these labels. Pixels\n        // become frame-height units before angles or torso-relative movement.\n        if ([5, 6, 11, 12, 13, 14, 15, 16].some(i => person.keypoints[i].score < .45)) return null;\n        const shoulders = midpoint(point(5), point(6));\n        const hips = midpoint(point(11), point(12));\n        const scale = distance(hips, shoulders);\n        if (scale < .018 || scale > .55 || (hips.y - shoulders.y) / scale < .70) return null;\n        const leftAnkle = point(15), rightAnkle = point(16);\n        const left = legFeature(point(11), point(13), leftAnkle, scale), right = legFeature(point(12), point(14), rightAnkle, scale);\n        if (!left || !right || !left.ankleBelowHip || !right.ankleBelowHip) return null;\n        const pose = left.standing && right.standing ? 'standing' : left.seated && right.seated ? 'seated' : 'unknown';\n        return { at, x: hips.x, y: hips.y, scale, stride: (leftAnkle.x - rightAnkle.x) / scale,\n            leftFootY: (leftAnkle.y - hips.y) / scale, rightFootY: (rightAnkle.y - hips.y) / scale, pose };\n    }\n\n    function classify(observations) {\n        const latest = observations.at(-1);\n        const gait = observations.filter(sample => latest.at - sample.at <= 1900);\n        if (gait.length >= 8 && latest.at - gait[0].at >= 1200 && latest.pose !== 'seated') {\n            const first = gait[0], duration = (latest.at - first.at) / 1000, scale = median(gait.map(sample => sample.scale));\n            const dx = Math.abs(latest.x - first.x), speed = dx / (scale * duration);\n            const path = gait.slice(1).reduce((sum, sample, i) => sum + Math.abs(sample.x - gait[i].x), 0);\n            const recent = gait.find(sample => latest.at - sample.at <= 400 && latest.at - sample.at >= 220);\n            const recentSpeed = recent ? Math.abs(latest.x - recent.x) / (scale * (latest.at - recent.at) / 1000) : 0;\n            const yValues = gait.map(sample => sample.y), scales = gait.map(sample => sample.scale);\n            const consistent = recent && speed >= .45 && dx / path >= .76 && recentSpeed >= speed * .40\n                && Math.sign(latest.x - recent.x) === Math.sign(latest.x - first.x)\n                && Math.max(...yValues) - Math.min(...yValues) <= .55 * scale\n                && Math.max(...scales) / Math.min(...scales) <= 1.35\n                && gait.filter(sample => sample.pose === 'seated').length <= gait.length * .15;\n            if (consistent) {\n                // Dead band filters foot jitter. Require repeated left-right\n                // stride reversals with plausible intervals rather than speed alone.\n                const swaps = [];\n                let sign = 0;\n                for (const sample of gait) {\n                    const next = sample.stride >= .24 ? 1 : sample.stride <= -.24 ? -1 : 0;\n                    if (next && sign && sign !== next) swaps.push(sample.at);\n                    if (next) sign = next;\n                }\n                const intervals = swaps.slice(1).map((time, i) => time - swaps[i]);\n                if (intervals.length && intervals.every(ms => ms >= 130 && ms <= 1150) && latest.at - swaps.at(-1) <= 650) {\n                    const cadence = 1000 / median(intervals);\n                    if (speed >= 3.6 && speed <= 11 && cadence >= 2.6 && cadence <= 6.5 && latest.at - swaps.at(-1) <= 480) return 'running';\n                    if (speed <= 3.2 && cadence >= .9 && cadence <= 3.1) return 'walking';\n                }\n            }\n        }\n        if (latest.pose === 'unknown') return 'unknown';\n        // Require a continuous still stretch in the same posture. Looking back\n        // just far enough avoids retaining a prior activity across a transition.\n        let first = observations.length - 1;\n        while (first > 0 && (latest.at - observations[first].at < 600 || observations.length - first < 3)) first--;\n        const still = observations.slice(first);\n        if (still.length < 3 || latest.at - still[0].at < 600 || latest.at - still[0].at > 1200 || still.some(sample => sample.pose !== latest.pose)) return 'unknown';\n        const extent = key => Math.max(...still.map(sample => sample[key])) - Math.min(...still.map(sample => sample[key]));\n        const scale = median(still.map(sample => sample.scale));\n        if (extent('x') > .24 * scale || extent('y') > .20 * scale || extent('scale') > .22 * scale || extent('stride') > .30\n            || extent('leftFootY') > .26 || extent('rightFootY') > .26) return 'unknown';\n        return latest.pose;\n    }\n\n    for (const person of frame.people) {\n        const sample = observe(person);\n        // Missing landmarks end the usable history, even if that track ID returns.\n        if (!sample) { snapshot.unknown++; continue; }\n        let observations = prior.get(person.id) || [];\n        const last = observations.at(-1);\n        if (last) {\n            const elapsed = at - last.at, relativeShift = distance(sample, last) / Math.min(sample.scale, last.scale);\n            if (elapsed > 750 || elapsed <= 0 || relativeShift > Math.max(.6, 12 * elapsed / 1000)\n                || Math.max(sample.scale, last.scale) / Math.min(sample.scale, last.scale) > 1.4) observations = [];\n        }\n        observations = observations.filter(item => at - item.at <= 2400).slice(-31);\n        const current = [...observations, sample];\n        snapshot[classify(current)]++;\n        // Bound history to 32 observations; still examine intervening high-rate\n        // frames so occlusion and sudden changes immediately clear stale labels.\n        if (!observations.length || at - observations.at(-1).at >= 50 || observations.at(-1).pose !== sample.pose) observations = current;\n        state.tracks.push({ id: person.id, observations });\n    }\n    return { snapshot, state };\n};\nreturn handleCiraPose(msg, msg._poseExpiry === true ? 'EXPIRE' : 'POST', {flow, key:'ciraPoseActivityV1', update,\n    now:Date.now(), maxAgeMs:5000, maxBodyBytes:131072});",
+    "outputs": 1,
+    "timeout": 1,
+    "noerr": 0,
+    "initialize": "flow.set('ciraPoseActivityV1', null);",
+    "finalize": "",
+    "libs": [],
+    "x": 565,
+    "y": 680,
+    "wires": [
+      [
+        "c1a5402000000018"
+      ]
+    ]
+  },
+  {
+    "id": "c1a5402000000019",
+    "type": "http in",
+    "z": "c1a5402000000001",
+    "name": "GET activity • localhost",
+    "url": "/cira-activity",
+    "method": "get",
+    "upload": false,
+    "x": 215,
+    "y": 820,
+    "wires": [
+      [
+        "c1a5402000000020"
+      ]
+    ]
+  },
+  {
+    "id": "c1a5402000000020",
+    "type": "function",
+    "z": "c1a5402000000001",
+    "name": "อ่านผลรวมท่าทาง • ไม่ส่งข้อมูลดิบ",
+    "func": "const handleCiraPose = function handleCiraPose(msg, method, { flow, key, update, now, maxAgeMs, maxBodyBytes }) {\n    const json = (status, data) => {\n        msg.statusCode = status;\n        msg.headers = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' };\n        msg.payload = JSON.stringify(data);\n        return msg;\n    };\n    const error = (status, code) => json(status, { ok: false, code });\n    const req = msg.req;\n    if (method !== 'EXPIRE' && !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req?.socket?.remoteAddress)) return error(403, 'LOCAL_ONLY');\n\n    const record = flow.get(key) || { state: null, activity: null, activityWindow: [], lastCapturedAt: null, lastReceivedAt: null, events: [], sampledAt: {} };\n    const append = (...events) => {\n        record.events = [...record.events, ...events].slice(-20);\n    };\n    const sample = key => {\n        const previous = record.sampledAt[key];\n        if (previous !== undefined && now >= previous && now - previous < 1000) return false;\n        record.sampledAt[key] = now;\n        return true;\n    };\n    const save = () => flow.set(key, record);\n    const stale = () => !record.activity || now - record.activity.captured_at > maxAgeMs || now - record.lastReceivedAt > maxAgeMs;\n    const prune = () => {\n        if (!record.activity || !stale()) return;\n        record.activity = null;\n        record.state = null;\n        record.activityWindow = [];\n        append({ at: now, stage: 'stale' });\n        save();\n    };\n\n    if (method === 'GET') {\n        prune();\n        return json(200, { source: 'cira', serverTime: now, lastReceivedAt: record.lastReceivedAt,\n            stale: stale(), activity: record.activity, activityWindow: record.activityWindow, events: record.events });\n    }\n    if (method === 'EXPIRE') {\n        prune();\n        return null;\n    }\n    if (method !== 'POST') return error(405, 'METHOD');\n\n    // Raw poses are accepted only from a local sender, outside a browser page.\n    // No forwarding header can make a nonloopback socket look local.\n    const headers = req.headers || {};\n    if (headers.origin || headers['sec-fetch-site']) return error(403, 'LOCAL_ONLY');\n    prune();\n    const reject = (status, code) => {\n        if (sample('rejected')) { append({ at: now, stage: 'rejected', code }); save(); }\n        return error(status, code);\n    };\n    if (!/^application\\/json(?:\\s*;|$)/i.test(String(headers['content-type'] || ''))) return reject(415, 'CONTENT_TYPE');\n    if (Number(headers['content-length']) > maxBodyBytes) return reject(413, 'TOO_LARGE');\n    if (!msg.payload || typeof msg.payload !== 'object' || Array.isArray(msg.payload)) return reject(400, 'INVALID_FRAME');\n    if (record.lastCapturedAt !== null && msg.payload.captured_at <= record.lastCapturedAt) return reject(400, 'INVALID_FRAME');\n\n    let result;\n    try {\n        // Content-Length is optional (chunked encoding); check the decoded body too.\n        if (Buffer.byteLength(JSON.stringify(msg.payload), 'utf8') > maxBodyBytes) return reject(413, 'TOO_LARGE');\n        result = update(msg.payload, record.state, { now, maxAgeMs });\n    } catch (_) { return reject(500, 'PROCESSING_ERROR'); }\n    if (!result) return reject(400, 'INVALID_FRAME');\n\n    // Copy a fixed projection; classifier internals can never enter events or HTTP output.\n    const { captured_at, total_people, seated, standing, walking, running, unknown } = result.snapshot;\n    const activity = { total_people, seated, standing, walking, running, unknown };\n    // Hold separate sampled evidence for the comfort advisor, not a frame log.\n    // Both camera and receipt gaps break continuity. A batch of old frames\n    // cannot manufacture an uninterrupted history across a disconnect.\n    if (record.lastCapturedAt === null || captured_at - record.lastCapturedAt > 2600 || now - record.lastReceivedAt > 2600) {\n        record.activityWindow = [];\n    }\n    record.state = result.state;\n    record.activity = { captured_at, ...activity };\n    const lastPoint = record.activityWindow.at(-1);\n    if (!lastPoint || captured_at - lastPoint.captured_at >= 1000) {\n        record.activityWindow = [...record.activityWindow, record.activity].filter(point => captured_at - point.captured_at <= 35000).slice(-36);\n    }\n    record.lastCapturedAt = captured_at;\n    record.lastReceivedAt = now;\n    if (sample('classified')) append({ at: now, stage: 'received' }, { at: now, stage: 'classified', activity });\n    save();\n    return json(200, { ok: true });\n};\nconst update = null;\nreturn handleCiraPose(msg, 'GET', {flow, key:'ciraPoseActivityV1', update,\n    now:Date.now(), maxAgeMs:5000, maxBodyBytes:131072});",
+    "outputs": 1,
+    "timeout": 1,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 565,
+    "y": 820,
+    "wires": [
+      [
+        "c1a5402000000018"
+      ]
+    ]
+  },
+  {
+    "id": "c1a5402000000018",
+    "type": "http response",
+    "z": "c1a5402000000001",
+    "name": "Pose / activity JSON • no-store",
+    "statusCode": "",
+    "headers": {},
+    "x": 930,
+    "y": 720,
+    "wires": []
+  },
+  {
+    "id": "c1a5402000000021",
+    "type": "inject",
+    "z": "c1a5402000000001",
+    "name": "ล้างสถานะติดตามเก่า (ทุก 2 วินาที)",
+    "props": [
+      {
+        "p": "_poseExpiry",
+        "v": "true",
+        "vt": "bool"
+      }
+    ],
+    "repeat": "2",
+    "crontab": "",
+    "once": false,
+    "onceDelay": ".1",
+    "x": 225,
+    "y": 740,
+    "wires": [
+      [
+        "c1a5402000000017"
+      ]
+    ]
+  }
+]

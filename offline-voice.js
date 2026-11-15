@@ -40,7 +40,7 @@ class LocalVoice {
     });
     return this.ready;
   }
-  async classify(audio, signal) {
+  async classify(audio, signal, { wake = false } = {}) {
     signal?.throwIfAborted();
     if (this.pending.size >= 2) throw new VoiceError('โมเดลกำลังรับคำสั่งจากเครื่องอื่น กรุณาลองอีกครั้ง', 503);
     await new Promise((resolve, reject) => {
@@ -60,7 +60,7 @@ class LocalVoice {
         if (error) reject(error); else resolve(data);
       };
       this.pending.set(id, { finish });
-      this.child.stdin.write(JSON.stringify({ id, audio: audio.toString('base64') }) + '\n');
+      this.child.stdin.write(JSON.stringify({ id, audio: audio.toString('base64'), wake }) + '\n');
     });
   }
   close() {

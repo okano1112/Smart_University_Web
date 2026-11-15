@@ -1,7 +1,15 @@
 
 .venv-voice/
+node-red/runtime/
+data/ac-schedules.json
+data/ac-schedules.json.*.tmp
 __pycache__/
 
 models/whisper-small/
 models/whisper-medium/
 models/whisper-th-small/
+models/movenet-multipose.tflite
+
+.DS_Store
+
+node_modules/

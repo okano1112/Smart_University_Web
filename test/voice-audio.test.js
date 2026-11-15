@@ -9,3 +9,9 @@ test('suppression drops stale speech events and resumes the detector after its p
  assert.deepEqual(events,['pause']);audio.setInputSuppressed(false);await Promise.resolve();assert.equal(events.includes('resume'),false);
  release();await Promise.resolve();await Promise.resolve();assert.equal(events.at(-1),'resume');audio.closed=true;
 });
+test('an overlong utterance is discarded through its end without closing capture',()=>{
+ const events=[];const audio=new VoiceAudio({onStart:()=>events.push('start'),onEnd:()=>events.push('end'),onMisfire:reason=>events.push(reason)});
+ audio.speechStart();audio.discardLongSpeech();audio.speechEnd(new Float32Array(200));
+ audio.speechStart();audio.speechEnd(new Float32Array(200));
+ assert.deepEqual(events,['start','too_long','start','end']);assert.equal(audio.closed,false);
+});

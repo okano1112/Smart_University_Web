@@ -5,6 +5,8 @@
   "main": "index.js",
   "scripts": {
     "start": "node server.js",
+    "node-red:build": "node node-red/build-flow.js",
+    "node-red:start": "node scripts/start-cira-node-red.js",
     "test": "node --test test/*.test.js"
   },
   "keywords": [],
@@ -16,6 +18,7 @@
     "cors": "^2.8.6",
     "dotenv": "^18.0.9",
     "express": "^5.3.0",
+    "mqtt": "^5.16.1",
     "multer": "^2.5.0",
     "onnxruntime-web": "^1.14.0"
   }

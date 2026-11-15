@@ -6,15 +6,32 @@ const path = require('path');
 const { VoiceSessions, VoiceError, validAc } = require('./voice-session');
 const voiceSessions = new VoiceSessions();
 const { LocalVoice, commandFor } = require('./offline-voice');
-const { parseSpeech } = require('./local-commands');
+const { parseSpeech, verifiedWakeTranscript } = require('./local-commands');
 const localVoice = new LocalVoice();
 const { describe: describeVoiceCommand } = require('./public/js/voice-feedback');
 const { createCoolingForecastRouter } = require('./cooling-forecast-route');
+const { createComfortHandler } = require('./comfort-route');
+const { AcScheduler } = require('./ac-scheduler');
+const { SchedulerMqtt } = require('./ac-scheduler-mqtt');
+const { createScheduleRouter } = require('./ac-scheduler-route');
+const scheduleMqtt = new SchedulerMqtt();
+const acScheduler = new AcScheduler({
+  storePath: path.join(__dirname, 'data', 'ac-schedules.json'),
+  publish: payload => scheduleMqtt.publish(payload),
+  connection: () => scheduleMqtt.status(),
+  destination: () => scheduleMqtt.config
+});
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 app.use('/api/cooling-forecast', createCoolingForecastRouter());
+app.use('/api/schedules', createScheduleRouter({ scheduler: acScheduler }));
+app.get('/api/cira/logs', require('./cira-logs-route').readCiraLogs);
+app.post('/api/comfort/recommendation', createComfortHandler());
+
+// Serve the same installed MQTT.js bundle to browsers without a third-party CDN.
+app.get('/vendor/mqtt.min.js', (req, res) => res.sendFile(path.join(path.dirname(require.resolve('mqtt/package.json')), 'dist', 'mqtt.min.js')));
 
 // เสิร์ฟไฟล์โมเดล Silero VAD และ ONNX Runtime จากเครื่องตัวเอง
 app.use('/vad-web', express.static(path.join(__dirname, 'node_modules/@ricky0123/vad-web/dist')));
@@ -58,6 +75,7 @@ app.post('/api/voice-command', upload.single('audio'), voiceRoute(async req => {
     const startTime = Date.now();
     const stage = req.body.stage;
     if (!['continuous', 'command', 'direct'].includes(stage)) throw new VoiceError('สถานะรับเสียงไม่ถูกต้อง');
+    const waitingForWake = stage === 'continuous';
     if (stage === 'command') voiceSessions.consume(session, req.body.wakeToken);
     const audio = req.file?.buffer;
     if (!audio || audio.length < 1644 || audio.toString('ascii', 0, 4) !== 'RIFF' || audio.toString('ascii', 8, 12) !== 'WAVE' || audio.length > 16_000 * 2 * 16 + 44) {
@@ -66,20 +84,25 @@ app.post('/api/voice-command', upload.single('audio'), voiceRoute(async req => {
     let currentAc;
     try { currentAc = JSON.parse(req.body.currentAc); } catch (_) { }
     if (!currentAc || !validAc({ ...currentAc, power: currentAc.power === null ? true : currentAc.power })) throw new VoiceError('สถานะอุปกรณ์ไม่ถูกต้อง');
-    const result = await localVoice.classify(audio, signal);
+    const result = await localVoice.classify(audio, signal, { wake: waitingForWake });
     signal.throwIfAborted();
     const engine = result.engine || 'LOCAL_WHISPER';
-    const transcript = result.transcript || '';
+    const latencyMs = Date.now() - startTime;
+    // An ordinary transcript (including a prompted or legacy model result) is
+    // never enough to open the hands-free window or trigger a command.
+    const wakeTranscript = waitingForWake ? verifiedWakeTranscript(result) : null;
+    if (waitingForWake && !wakeTranscript) return { success:false, ignored:true, waitingForWake:true, engine, latencyMs };
+    const wakeEvidence = waitingForWake ? { wakeVerified: true } : {};
+    const transcript = wakeTranscript || result.transcript || '';
     const intent = result.engine === 'LOCAL_WHISPER' && result.accepted
       ? parseSpeech(transcript, { expectingTemperature: Date.now() < (session.temperatureUntil || 0) }) : null;
-    const latencyMs = Date.now() - startTime;
-    // The server enforces name-first in continuous mode, not just the UI.
-    if (stage === 'continuous' && !intent?.hasWakeWord) return { success:false, ignored:true, waitingForWake:true, engine, latencyMs };
-    if (intent?.wakeOnly) return { success: false, wakeOnly: true, wakeToken:voiceSessions.issueWake(session), engine, transcript, latencyMs,
+    if (waitingForWake && !intent?.hasWakeWord) return { success:false, ignored:true, waitingForWake:true, engine, latencyMs };
+    const ticket = () => stage === 'direct' ? {} : { wakeToken: voiceSessions.issueWake(session) };
+    if (intent?.wakeOnly) return { success: false, wakeOnly: true, ...ticket(), ...wakeEvidence, engine, transcript, latencyMs,
       feedback: { text: 'ครับ พูดได้เลยครับ', clips: ['wake-ready'] } };
     if (intent?.askTemperature) {
       session.temperatureUntil = Date.now() + 20000;
-      return { success: false, followUp: 'temperature', wakeToken:voiceSessions.issueWake(session), engine, transcript, latencyMs,
+      return { success: false, followUp: 'temperature', ...ticket(), ...wakeEvidence, engine, transcript, latencyMs,
         message: 'ต้องการกี่องศาครับ', feedback: { text: 'ต้องการกี่องศาครับ', clips: ['ask-temperature'] } };
     }
     const parsed = commandFor(intent?.commands ? { accepted: true, commands: intent.commands } : intent ? {} : result, currentAc);
@@ -87,16 +110,14 @@ app.post('/api/voice-command', upload.single('audio'), voiceRoute(async req => {
       const tooLong = result.reason === 'too_long';
       const negated = intent?.reason === 'negated';
       if (negated) session.temperatureUntil = 0;
-      const commandLike = /แอร์|อุณหภูมิ|พัดลม|เอ็น|\b(?:engi|ac|temperature)\b/i.test(transcript);
       const message = negated ? 'รับทราบครับ ยังไม่ส่งคำสั่ง' : tooLong ? 'กรุณาพูดคำสั่งให้สั้นลง ไม่เกินสิบสองวินาทีครับ' : transcript ? `ได้ยินว่า “${transcript}” กรุณาระบุคำสั่งอีกครั้ง` : 'ได้ยินเสียงไม่ชัด กรุณาพูดใหม่';
-      return { success: false, ignored: stage === 'continuous' && !tooLong && !negated && !commandLike,
-        engine, transcript, latencyMs, message,
+      return { success: false, ...wakeEvidence, engine, transcript, latencyMs, message,
         feedback: { text: message, clips: [negated ? 'cancelled' : tooLong ? 'too-long' : 'not-understood'] } };
     }
-    if (parsed.unsupported) return { success: false, engine, transcript, latencyMs,
+    if (parsed.unsupported) return { success: false, ...wakeEvidence, engine, transcript, latencyMs,
       message: parsed.message, feedback: parsed.feedback };
     session.temperatureUntil = 0; session.wake = null;
-    return { success: true, transcript: transcript || parsed.text, label: `คำสั่งในเครื่อง: ${parsed.text}`,
+    return { success: true, ...wakeEvidence, transcript: transcript || parsed.text, label: `คำสั่งในเครื่อง: ${parsed.text}`,
       engine, latencyMs, nextState: parsed.next,
       feedback: describeVoiceCommand(parsed.next, currentAc, parsed.fields) };
   });
@@ -108,6 +129,7 @@ app.use((error, req, res, next) => {
 
 const PORT = process.env.PORT || 3000;
 if (require.main === module) app.listen(PORT, () => {
+  acScheduler.start().then(() => scheduleMqtt.start()).catch(error => console.error('[Schedule]', error.message));
   // Warm the local model once; no external AI endpoint is used.
   localVoice.start().then(() => console.log('Local Whisper พร้อมรับคำสั่ง • ไม่ใช้ AI API ภายนอก')).catch(error => console.error(error.message));
   console.log('================================================================');
@@ -115,8 +137,12 @@ if (require.main === module) app.listen(PORT, () => {
   console.log('โมเดลคำสั่งเสียง: models/whisper-th-small (CPU INT8)');
   console.log('================================================================');
 });
-module.exports = { app, voiceSessions, localVoice };
+module.exports = { app, voiceSessions, localVoice, acScheduler, scheduleMqtt };
 
 if (require.main === module) {
-  for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { localVoice.close(); process.exit(0); });
+  for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, async () => {
+    localVoice.close();
+    await acScheduler.close(); await scheduleMqtt.close();
+    process.exit(0);
+  });
 }

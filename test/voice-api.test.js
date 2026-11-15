@@ -12,8 +12,10 @@ test('offline API: local inference, no external fetch, deduplication and rejecti
   localVoice.start = async () => {};
   global.fetch = () => { throw new Error('External fetch forbidden'); };
   const base = `http://127.0.0.1:${server.address().port}`;
-  let calls = 0, prediction = { accepted: true, label: '00_POWER_ON', confidence: 0.99, margin: 0.98 };
-  localVoice.classify = async () => { calls++; return prediction; };
+  let calls = 0, inferenceOptions, prediction = { accepted: true, label: '00_POWER_ON', confidence: 0.99, margin: 0.98 };
+  localVoice.classify = async (_audio, _signal, options) => { calls++; inferenceOptions = options; return prediction; };
+  const wakePrediction = transcript => ({ accepted:true, engine:'LOCAL_WHISPER', transcript,
+    noSpeechProbability:.01, wakeCandidates:[{transcript,score:-.2}] });
   let sequence = 0;
   const json = async (route, body) => {
     const r = await fetchHttp(base + route, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -34,12 +36,31 @@ test('offline API: local inference, no external fetch, deduplication and rejecti
       const a = await command(session.sessionId, 'direct', 'request-deduplicated-1111');
       const b = await command(session.sessionId, 'direct', 'request-deduplicated-1111');
       assert.deepEqual(a, b); assert.equal(calls, 1); assert.equal(a.success, true);
+      assert.equal(inferenceOptions.wake, false);
       assert.deepEqual(a.nextState, { power: true, temp: 24, mode: 2, fan: 2 });
       assert.deepEqual(a.feedback.clips, ['power-on']);
     });
     await t.test('name plus command executes directly without an extra greeting', async () => {
-      prediction={accepted:true,engine:'LOCAL_WHISPER',transcript:'เอ็นจี้ปิดแอร์'}; const r = await command(session.sessionId, 'continuous');
-      assert.equal(r.nextState.power, false); assert.equal(r.wakeOnly, undefined);
+      prediction=wakePrediction('เอ็นจี้ปิดแอร์'); const r = await command(session.sessionId, 'continuous');
+      assert.equal(inferenceOptions.wake, true);
+      assert.equal(r.nextState.power, false); assert.equal(r.wakeOnly, undefined); assert.equal(r.wakeVerified, true);
+    });
+    await t.test('hands-free remains silent without trusted wake evidence, even when the transcript spells Engi', async () => {
+      const baseWake = wakePrediction('เอ็นจี้เปิดแอร์');
+      for (const result of [
+        {accepted:true, engine:'LOCAL_WHISPER', transcript:'เอ็นจี้'},
+        {...baseWake, noSpeechProbability:.9},
+        {...baseWake, wakeCandidates:[{transcript:'เอ็นจี้เปิดแอร์',score:-.9}]},
+        {...baseWake, wakeCandidates:[{transcript:'เอ็นที่เปิดแอร์',score:-.3},{transcript:'เอ็นจี้ปิดแอร์',score:-.4}]},
+        {...baseWake, wakeCandidates:[{transcript:'เปิดแอร์',score:-.2},{transcript:'เอ็นจี้เปิดแอร์',score:-.3}]},
+        {...baseWake, wakeCandidates:[{transcript:'เอ็นที่',score:-.3}]},
+        wakePrediction('เอ็นจินเปิดแอร์'), wakePrediction('มีคนชื่อเอ็นจี้ เปิดแอร์')
+      ]) {
+        prediction = result;
+        const r = await command(session.sessionId, 'continuous');
+        assert.equal(r.status,200); assert.equal(r.ignored,true); assert.equal(r.waitingForWake,true);
+        for (const key of ['feedback','wakeToken','wakeVerified','nextState','transcript']) assert.equal(r[key],undefined,key);
+      }
     });
     await t.test('background and uncertain output never produce a state change', async () => {
       for (const result of [{ accepted: false }, { accepted: true, label: '29_BACKGROUND', confidence: 1, margin: 1 }, { accepted: true, label: '00_POWER_ON', confidence: 0.6, margin: 0.5 }]) {
@@ -48,12 +69,13 @@ test('offline API: local inference, no external fetch, deduplication and rejecti
         assert.equal((await command(session.sessionId, 'continuous')).ignored, true);
       }
     });
-    await t.test('long continuous utterance explains the local recording limit without sending', async () => {
+    await t.test('long continuous utterance remains silent without wake', async () => {
       prediction = {accepted:false,reason:'too_long'};
       const r = await command(session.sessionId,'continuous');
       assert.equal(r.success,false); assert.equal(r.ignored,true); assert.equal(r.nextState,undefined);
+      assert.equal(r.feedback,undefined);
     });
-    await t.test('unsupported commands respond with speech and no nextState in continuous mode', async () => {
+    await t.test('unsupported direct commands respond with speech and no nextState', async () => {
       for (const label of ['04_SET_18','16_SET_30','22_MODE_SLEEP','27_SWING_ON','28_SWING_OFF']) {
         prediction = {accepted:true,label,confidence:0.99,margin:0.98};
         const r = await command(session.sessionId,'direct');
@@ -69,22 +91,40 @@ test('offline API: local inference, no external fetch, deduplication and rejecti
       const question=await command(session.sessionId,'direct');assert.equal(question.followUp,'temperature');assert.equal(question.nextState,undefined);
       assert.deepEqual(question.feedback.clips,['ask-temperature']);
       prediction.transcript='ยี่สิบห้าองศา';const answer=await command(session.sessionId,'direct');assert.equal(answer.nextState.temp,25);
-      prediction.transcript='เอ็นจี้';assert.equal((await command(session.sessionId,'continuous')).wakeOnly,true);
+      prediction=wakePrediction('เอ็นจี้');assert.equal((await command(session.sessionId,'continuous')).wakeOnly,true);
       prediction.transcript='ไม่ต้องเปิดแอร์';assert.equal((await command(session.sessionId,'continuous')).success,false);
     });
     await t.test('continuous mode ignores commands without Engi; name ticket is one-shot and browser-bound', async () => {
       prediction={accepted:true,engine:'LOCAL_WHISPER',transcript:'เปิดแอร์ให้ผมหน่อย'};
       const unnamed=await command(session.sessionId,'continuous');assert.equal(unnamed.ignored,true);assert.equal(unnamed.nextState,undefined);
-      prediction.transcript='เอนจี้';const wake=await command(session.sessionId,'continuous');assert.equal(wake.wakeOnly,true);assert.ok(wake.wakeToken);
+      prediction=wakePrediction('เอนจี้');const wake=await command(session.sessionId,'continuous');assert.equal(wake.wakeOnly,true);assert.equal(wake.wakeVerified,true);assert.ok(wake.wakeToken);
       const other=await json('/api/voice-session',{device:'room-a'});
       assert.equal((await json('/api/voice-session/arm',{sessionId:other.sessionId,device:'room-a',wakeToken:wake.wakeToken})).status,409);
       const body={sessionId:session.sessionId,device:'room-a',wakeToken:wake.wakeToken};
       await json('/api/voice-session/arm',body);await json('/api/voice-session/claim',body);
-      prediction.transcript='เปิดแอร์';
+      prediction=wakePrediction('เปิดแอร์');
       const form=new FormData();for(const [k,v] of Object.entries({...body,stage:'command',requestId:'request-ticket-command-1111',currentAc:JSON.stringify({power:false,temp:24,mode:0,fan:3})}))form.append(k,v);form.append('audio',audio,'voice.wav');
       const response=await fetchHttp(base+'/api/voice-command',{method:'POST',body:form});const result=await response.json();assert.equal(result.success,true);
       assert.equal((await json('/api/voice-session/claim',body)).status,409);
       assert.equal((await command(session.sessionId,'continuous')).ignored,true);
+    });
+    await t.test('verified named follow-up and errors carry proof; direct prompts cannot mint a wake token', async () => {
+      prediction=wakePrediction('เอ็นจี้ปรับอุณหภูมิ');
+      const followUp=await command(session.sessionId,'continuous');
+      assert.equal(followUp.followUp,'temperature');assert.equal(followUp.wakeVerified,true);assert.ok(followUp.wakeToken);
+      prediction=wakePrediction('เอ็นจี้สวัสดี');
+      const unclear=await command(session.sessionId,'continuous');
+      // No word boundary before สวัสดี. Even a confident spelling is ignored.
+      assert.equal(unclear.ignored,true);assert.equal(unclear.feedback,undefined);
+      prediction=wakePrediction('เอ็นจี้ สวัสดี');
+      const named=await command(session.sessionId,'continuous');
+      assert.equal(named.wakeVerified,true);assert.deepEqual(named.feedback.clips,['not-understood']);
+      prediction=wakePrediction('เอ็นจี้ โหมดนอน');
+      const unsupported=await command(session.sessionId,'continuous');
+      assert.equal(unsupported.wakeVerified,true);assert.deepEqual(unsupported.feedback.clips,['unsupported']);
+      prediction={accepted:true,engine:'LOCAL_WHISPER',transcript:'ปรับอุณหภูมิ'};
+      const direct=await command(session.sessionId,'direct');
+      assert.equal(direct.followUp,'temperature');assert.equal(direct.wakeToken,undefined);assert.equal(direct.wakeVerified,undefined);
     });
     await t.test('unavailable local engine fails visibly, never falls back to cloud', async () => {
       localVoice.classify = async () => { throw Object.assign(new Error('local unavailable'), { status: 503 }); };

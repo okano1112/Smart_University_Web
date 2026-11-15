@@ -57,7 +57,7 @@
             if (this.closed) return;
             if (this.context.state !== 'running') throw new Error('ระบบเสียงยังไม่พร้อม กรุณากดเปิดไมค์ใหม่');
             this.context.onstatechange = () => {
-                if (!this.closed && this.ready && this.context.state !== 'running') this.callbacks.onError(new Error('ระบบเสียงหยุดทำงาน กรุณากดเปิดไมค์ใหม่'));
+                if (!this.closed && this.ready && this.context.state !== 'running') this.callbacks.onError(new Error('ระบบเสียงถูกพักโดยเบราว์เซอร์'));
             };
             const stream = await navigator.mediaDevices.getUserMedia({ audio: {
                 echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1
@@ -65,8 +65,22 @@
             if (this.closed) { stream.getTracks().forEach(track => track.stop()); return; }
             this.stream = stream;
             stream.getAudioTracks().forEach(track => {
-                track.onended = () => { if (!this.closed) this.callbacks.onError(new Error('ไมโครโฟนถูกตัดการเชื่อมต่อ กรุณาเปิดไมค์ใหม่')); };
-                track.onmute = () => { if (!this.closed) this.callbacks.onError(new Error('ไมโครโฟนหยุดส่งเสียง กรุณาเปิดไมค์ใหม่')); };
+                track.onended = () => { if (!this.closed) this.callbacks.onError(new Error('ไมโครโฟนถูกตัดการเชื่อมต่อ')); };
+                track.onmute = () => {
+                    // The browser can mute a live track temporarily. Discard partial audio,
+                    // then wait for it to return rather than treating mute as a user stop.
+                    if (this.closed) return;
+                    this.inputMuted = true;
+                    this.resetInput();
+                    this.callbacks.onAvailability?.(false);
+                };
+                track.onunmute = () => {
+                    if (this.closed) return;
+                    this.inputMuted = false;
+                    this.resetInput();
+                    this.callbacks.onAvailability?.(true);
+                };
+                if (track.muted) track.onmute();
             });
             this.source = this.context.createMediaStreamSource(stream);
             try {
@@ -81,21 +95,33 @@
                     minSpeechFrames: 3, // 96 ms; short names are not rejected at 288 ms.
                     onSpeechStart: () => { if (this.processingInputEpoch === this.inputEpoch) this.speechStart(); },
                     onSpeechEnd: samples => { if (this.processingInputEpoch === this.inputEpoch) this.speechEnd(samples); },
-                    onVADMisfire: () => { if (this.inputSuppressed || this.processingInputEpoch !== this.inputEpoch) return; this.speaking = false; clearTimeout(this.maxTimer); this.callbacks.onMisfire(); }
+                    onVADMisfire: () => {
+                        if (this.inputSuppressed || this.inputMuted || this.processingInputEpoch !== this.inputEpoch) return;
+                        if (!this.finishSegment()) this.callbacks.onMisfire();
+                    }
                 });
                 if (this.closed) { this.detector.destroy(); return; }
                 // Serialize ONNX inference: slow frames must not mutate model state concurrently.
                 const processFrame = this.detector.processFrame.bind(this.detector);
                 let frames = Promise.resolve(), pending = 0;
                 this.detector.processFrame = frame => {
-                    if (this.closed || this.inputSuppressed) return Promise.resolve();
+                    if (this.closed || this.inputSuppressed || this.inputMuted) return Promise.resolve();
                     const inputEpoch = this.inputEpoch;
                     if (++pending > 64) {
                         pending--;
                         this.callbacks.onError(new Error('เครื่องประมวลผลเสียงไม่ทัน กรุณาเปิดไมค์ใหม่'));
                         return Promise.resolve();
                     }
-                    frames = frames.then(() => { if (!this.closed && !this.inputSuppressed && inputEpoch === this.inputEpoch) { this.processingInputEpoch = inputEpoch; return processFrame(frame); } })
+                    frames = frames.then(async () => {
+                        if (this.closed || this.inputSuppressed || this.inputMuted || inputEpoch !== this.inputEpoch) return;
+                        this.processingInputEpoch = inputEpoch;
+                        await processFrame(frame);
+                        // Keep detecting the end of the same utterance, but bound the
+                        // buffer and never interpret its tail as a new wake phrase.
+                        if (this.discarding && inputEpoch === this.inputEpoch && this.detector?.frameProcessor?.audioBuffer) {
+                            this.detector.frameProcessor.audioBuffer.length = 0;
+                        }
+                    })
                         .catch(error => { if (!this.closed) this.callbacks.onError(error); }).finally(() => { pending--; });
                     return frames;
                 };
@@ -119,18 +145,22 @@
             for (const key of Object.keys(root.SmartVoiceFeedback?.phrases || {})) this.loadClip(key).catch(() => {});
         }
         speechStart() {
-            if (this.closed || this.inputSuppressed) return;
+            if (this.closed || this.inputSuppressed || this.inputMuted) return;
             this.speaking = true;
             clearTimeout(this.maxTimer);
             this.maxTimer = setTimeout(() => {
-                if (!this.closed && this.speaking) this.callbacks.onError(new Error('เสียงต่อเนื่องเกิน 15 วินาที กรุณาเปิดไมค์ใหม่และพูดให้สั้นลง'));
-            }, 15000);
+                if (!this.closed && this.speaking) this.discardLongSpeech();
+            }, 13000);
             this.callbacks.onStart();
         }
         speechEnd(samples) {
-            if (this.closed || this.inputSuppressed) return;
-            this.speaking = false; clearTimeout(this.maxTimer);
-            this.callbacks.onEnd(samples);
+            if (this.closed || this.inputSuppressed || this.inputMuted) return;
+            if (!this.finishSegment()) this.callbacks.onEnd(samples);
+        }
+        finishSegment() {
+            const discarded = this.discarding;
+            this.speaking = false; this.discarding = false; clearTimeout(this.maxTimer);
+            return discarded;
         }
         async startFallback() {
             await this.context.audioWorklet.addModule('/js/voice-audio-worklet.js');
@@ -142,7 +172,7 @@
             const frameMs = 512 / this.context.sampleRate * 1000;
             this.resetFallback = () => { pre = []; chunks = []; duration = 0; silence = 0; voiced = 0; };
             this.worklet.port.onmessage = event => {
-                if (this.closed || this.inputSuppressed) return;
+                if (this.closed || this.inputSuppressed || this.inputMuted) return;
                 const frame = event.data;
                 const rms = Math.sqrt(frame.reduce((sum, sample) => sum + sample * sample, 0) / frame.length);
                 // Reject our two narrow-band chime frequencies in the RMS fallback.
@@ -159,9 +189,11 @@
                 if (!this.speaking && !speech) noise = Math.min(0.015, noise * 0.98 + rms * 0.02);
                 if (speech && !this.speaking) { chunks = pre; pre = []; duration = 0; voiced = 0; silence = 0; this.speechStart(); }
                 if (this.speaking) {
-                    chunks.push(frame); duration += frameMs;
+                    if (!this.discarding) chunks.push(frame); else chunks.length = 0;
+                    duration += frameMs;
                     if (speech) { silence = 0; voiced += frameMs; } else silence += frameMs;
                     if (silence >= 520) {
+                        if (this.discarding) { this.finishSegment(); this.resetFallback(); return; }
                         const audio = resample(merge(chunks), this.context.sampleRate);
                         chunks = []; duration = 0;
                         if (voiced >= 96) this.speechEnd(audio);
@@ -170,18 +202,26 @@
                 } else { pre.push(frame); while (pre.length * frameMs > 320) pre.shift(); }
             };
         }
+        discardLongSpeech() {
+            this.discarding = true;
+            this.callbacks.onMisfire('too_long');
+        }
         setInputSuppressed(suppressed) {
             this.inputSuppressed = suppressed;
+            this.resetInput();
+        }
+        resetInput() {
             this.inputEpoch++;
-            this.speaking = false; clearTimeout(this.maxTimer);
+            this.finishSegment();
             this.resetFallback?.();
-            if (suppressed) this.detector?.pause();
-            else if (!this.closed) {
-                const epoch = this.inputEpoch;
-                Promise.resolve(this.inferenceIdle?.()).then(() => {
-                    if (!this.closed && !this.inputSuppressed && epoch === this.inputEpoch) { this.detector?.pause(); this.detector?.start(); }
-                });
-            }
+            this.detector?.pause();
+            if (this.closed || this.inputSuppressed || this.inputMuted) return;
+            const epoch = this.inputEpoch;
+            Promise.resolve(this.inferenceIdle?.()).then(() => {
+                if (!this.closed && !this.inputSuppressed && !this.inputMuted && epoch === this.inputEpoch) {
+                    this.detector?.pause(); this.detector?.start();
+                }
+            });
         }
         loadClip(key) {
             if (!Object.hasOwn(root.SmartVoiceFeedback?.phrases || {}, key)) return Promise.reject(new Error('ไม่พบข้อความเสียงตอบกลับ'));

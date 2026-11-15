@@ -118,7 +118,8 @@
             this.lastStartedAt = 0;
             const delay = Math.min(30, 2 ** Math.min(this.failures++, 5));
             const version = this.version;
-            this.controller.setState('OFF', `การฟังขาดช่วง · ลองเชื่อมใหม่ใน ${delay} วินาที`);
+            const reason = error.message || 'การฟังขาดช่วง';
+            this.controller.setState('OFF', `${reason} · ลองใหม่ใน ${delay} วินาที`);
             clearTimeout(this.retryTimer);
             this.retryTimer = setTimeout(() => {
                 if (version === this.version) this.resume();

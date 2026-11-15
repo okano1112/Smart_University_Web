@@ -11,21 +11,27 @@ class LocalVoice {
     if (this.ready) return this.ready;
     this.ready = new Promise((resolve, reject) => {
       const python = process.env.VOICE_PYTHON || path.join(__dirname, '.venv-voice', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
-      const child = spawn(python, ['-u', path.join(__dirname, this.engine === 'tflite' ? 'offline-voice/worker.py' : 'offline-voice/asr_worker.py')], { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
+      const child = spawn(python, ['-u', path.join(__dirname, this.engine === 'tflite' ? 'offline-voice/worker.py' : 'offline-voice/asr_worker.py')], {
+        stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, PYTHONIOENCODING: 'utf-8' }
+      });
       this.child = child;
-      const failure = () => {
+      const unavailable = new VoiceError('โมเดลเสียงเปิดไม่สำเร็จ กรุณาตรวจ Python และไฟล์โมเดลบนเซิร์ฟเวอร์', 503);
+      const failure = (error = unavailable) => {
         if (this.child !== child) return;
         this.child = null; this.ready = null;
         clearTimeout(startTimer);
-        const error = new VoiceError('โมเดลเสียงในเครื่องไม่พร้อม ตรวจ Python และ dependencies ในคู่มือติดตั้ง', 503);
         reject(error);
         for (const job of this.pending.values()) job.finish(error);
         this.pending.clear();
         child.kill();
       };
-      const startTimer = setTimeout(failure, 90000);
-      child.on('error', failure); child.on('exit', failure); child.stdin.on('error', failure);
-      // TensorFlow logs belong on stderr, never in the JSON protocol.
+      const startTimer = setTimeout(() => failure(new VoiceError('เซิร์ฟเวอร์ใช้เวลาโหลดโมเดลเสียงเกิน 90 วินาที', 504)), 90000);
+      child.on('error', error => {
+        if (process.env.VOICE_DEBUG === '1') console.error('[Voice]', error);
+        failure(error.code === 'ENOENT' ? new VoiceError('เซิร์ฟเวอร์ไม่พบ Python สำหรับระบบเสียง', 503) : unavailable);
+      });
+      child.on('exit', () => failure()); child.stdin.on('error', () => failure());
+      // Python diagnostics belong on stderr, outside the JSON protocol.
       child.stderr.on('data', data => { if (process.env.VOICE_DEBUG === '1') process.stderr.write(data); });
       const lines = readline.createInterface({ input: child.stdout });
       lines.on('line', line => {

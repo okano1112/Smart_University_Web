@@ -16,9 +16,31 @@ npm install
 npm start
 ```
 
-Windows ใช้ `.venv-voice\Scripts\python.exe` ตั้ง `VOICE_PYTHON` เป็น absolute path ได้ น้ำหนัก ASR ประมาณ 0.5 GB บนดิสก์ การติดตั้ง/ดาวน์โหลดใช้อินเทอร์เน็ต หลังติดตั้ง runtime ไม่ใช้บริการ AI API แต่หน้าเว็บเดิมยังมี Tailwind/Chart/MQTT ผ่าน CDN และ MQTT broker ตาม settings จึงไม่ได้หมายถึงทั้งเว็บตัดอินเทอร์เน็ตได้ทั้งหมด
+น้ำหนัก ASR ใช้พื้นที่ประมาณ 0.5 GB การติดตั้งและดาวน์โหลดโมเดลต้องใช้อินเทอร์เน็ต หลังติดตั้ง Engi ถอดเสียงบนเซิร์ฟเวอร์ด้วยโมเดลในเครื่อง ส่วน MQTT.js โหลดจากเซิร์ฟเวอร์เดียวกับหน้าเว็บ ฟอนต์และ Chart.js โหลดจากภายนอก และการควบคุมอุปกรณ์ใช้ MQTT Broker ตามที่ตั้งไว้
 
 ไฟล์ `models/whisper-th-small/manifest.json` บันทึกแหล่งและ SHA-256 สำหรับตรวจการติดตั้ง ไฟล์น้ำหนักไม่รวม Git ให้ติดตั้งแยกด้วยสคริปต์ข้างต้น
+
+### ติดตั้ง Engi บน Windows
+
+ติดตั้ง Node.js และ Python 3.12 แบบ x64 บนเครื่อง Windows แล้วเปิด PowerShell ที่โฟลเดอร์โปรเจกต์ Python 3.12 ติดตั้งคู่กับ Python 3.15 ได้ สำหรับ Engi ให้ใช้ 3.12 เพราะ `onnxruntime` ที่ `faster-whisper` ต้องใช้ยังไม่มี wheel สำหรับ CPython 3.15 บน Windows x64 [รายการไฟล์ ONNX Runtime](https://pypi.org/project/onnxruntime/#files)
+
+ถ้าใช้ Python Install Manager ให้รัน `pymanager install 3.12` ถ้ายังไม่มี Install Manager ใช้ [ตัวติดตั้ง Python 3.12.10 สำหรับ Windows x64](https://www.python.org/downloads/release/python-31210/#files) และเลือกติดตั้ง Python Launcher จากนั้นเปิด PowerShell ใหม่และตรวจด้วย `py -3.12 --version` ถ้าเคยสร้าง `.venv-voice` ด้วย Python รุ่นอื่น ให้เปลี่ยนชื่อโฟลเดอร์เดิมก่อนสร้างใหม่ [คู่มือ Python บน Windows](https://docs.python.org/3.12/using/windows.html#the-python-launcher-for-windows)
+
+```powershell
+npm.cmd ci
+py -3.12 -m venv .venv-voice
+.\.venv-voice\Scripts\python.exe -m pip install faster-whisper==1.2.1
+.\.venv-voice\Scripts\python.exe .\scripts\download-local-asr.py
+npm.cmd start
+```
+
+ถ้ามีน้ำหนักอยู่แล้ว คัดลอกโฟลเดอร์ `models/whisper-th-small/` ทั้งโฟลเดอร์มาไว้ในตำแหน่งเดิมบน Windows แล้วข้ามคำสั่งดาวน์โหลด Node.js จะเปิด `.venv-voice\Scripts\python.exe` โดยอัตโนมัติ หากติดตั้ง Python สำหรับ Engi ไว้ที่อื่น ตั้ง `VOICE_PYTHON` เป็นพาธเต็มของ `python.exe` ในสภาพแวดล้อมที่รัน Node.js หากยังไม่ได้สร้างบัญชีบนเครื่องใหม่ ให้ทำตาม [คู่มือตั้งค่า Login](../LOGIN.md)
+
+### ตรวจเมื่อสถานะสลับระหว่างกำลังเตรียมโมเดลกับการฟังขาดช่วง
+
+1. หยุดเซิร์ฟเวอร์เดิม เปิด PowerShell ในโฟลเดอร์โปรเจกต์ ตั้ง `$env:VOICE_DEBUG = '1'` แล้วรัน `npm.cmd start` ในหน้าต่างเดียวกัน เมื่อเห็น `Local Whisper พร้อมรับคำสั่ง • ไม่ใช้ AI API ภายนอก` โมเดลโหลดเสร็จแล้ว ถ้าพบ `ENOENT`, `ModuleNotFoundError`, `Missing local ASR file` หรือ `DLL load failed` ให้ตรวจพาธ Python, การติดตั้ง `faster-whisper`, โฟลเดอร์โมเดล หรือ Visual C++ Runtime ตามข้อความที่เห็น [คู่มือติดตั้ง CTranslate2](https://opennmt.net/CTranslate2/installation)
+2. เปิด `http://127.0.0.1:3000/` บน Windows ล็อกอิน แล้วกด `F12` → `Network` ก่อนเปิดโหมดเรียก Engi ดูคำขอ `POST /api/voice-session` ถ้าได้ `503` หรือ `504` ให้ดูข้อความตอบกลับและบันทึกใน PowerShell ถ้าได้ `401` ให้ล็อกอินใหม่ ถ้าได้ `200` พร้อม `sessionId` โมเดลสร้างเซสชันได้แล้ว หากไม่มีคำขอออกมา ให้ดู `Console` และตรวจสิทธิ์ไมโครโฟนของเบราว์เซอร์กับการโหลดไฟล์ตรวจจับเสียงใน `Network`
+3. ถ้า localhost ใช้งานได้แล้ว ให้ลองเปิดโดเมน Cloudflare ผ่าน `https://` และอนุญาตไมโครโฟนสำหรับโดเมนนั้น สิทธิ์ไมโครโฟนของ localhost กับโดเมนมีการตั้งค่าแยกกัน
 
 ## การพูด
 

@@ -1,6 +1,8 @@
 (function (root) {
     'use strict';
     const QUERIES = new Set(['room_temperature', 'people_count', 'room_humidity', 'ac_setpoint', 'ac_power']);
+    // The server allows 90 seconds for the local Whisper worker to start.
+    const SESSION_START_TIMEOUT_MS = 95000;
     class VoiceController {
         constructor(options) {
             this.options = options;
@@ -15,16 +17,25 @@
         }
         async json(url, body, epoch, timeout = 14000) {
             const controller = new AbortController(); this.controllers.add(controller);
-            const timer = setTimeout(() => controller.abort(), timeout);
+            const start = url === '/api/voice-session';
+            const timedOut = new Error(start ? 'เซิร์ฟเวอร์ใช้เวลาเปิดโมเดลเสียงนานเกินไป' : 'เซิร์ฟเวอร์เสียงตอบกลับช้าเกินไป');
+            const timer = setTimeout(() => controller.abort(timedOut), timeout);
             try {
                 const response = await this.options.fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal });
-                const data = await response.json();
+                const data = await response.json().catch(() => null);
                 if (!this.active(epoch)) {
-                    if (url === '/api/voice-session' && data.sessionId) this.cancelSession(data.sessionId);
+                    if (start && data?.sessionId) this.cancelSession(data.sessionId);
                     throw new Error('CANCELLED');
                 }
-                if (!response.ok) throw Object.assign(new Error(data.message || 'โมเดลในเครื่องไม่พร้อม'), { status: response.status });
+                if (!response.ok || !data || (start && typeof data.sessionId !== 'string')) {
+                    const message = data?.message || `เซิร์ฟเวอร์เสียงตอบกลับผิดปกติ (HTTP ${response.status})`;
+                    throw Object.assign(new Error(message), { status: response.status });
+                }
                 return data;
+            } catch (error) {
+                if (controller.signal.reason === timedOut) throw timedOut;
+                if (start && error instanceof TypeError) throw new Error('ติดต่อเซิร์ฟเวอร์เสียงไม่ได้ กรุณาตรวจการเชื่อมต่อ');
+                throw error;
             } finally { clearTimeout(timer); this.controllers.delete(controller); }
         }
         cancelSession(sessionId) {
@@ -44,7 +55,7 @@
             if (this.options.canStart?.() === false) return false;
             this.lastStartError = null; this.stop();
             const epoch = this.epoch;
-            this.device = this.options.device(); this.handsFree = handsFree; this.failures = 0; this.setState('INIT');
+            this.device = this.options.device(); this.handsFree = handsFree; this.failures = 0; this.setState('INIT', 'กำลังเตรียมไมโครโฟน');
             const audio = this.options.audio({ onStart: () => this.onStart(epoch), onEnd: samples => { void this.onEnd(samples, epoch); },
                 onMisfire: reason => this.onMisfire(epoch, reason), onError: error => this.fatal(error, epoch),
                 onAvailability: available => this.onAvailability(epoch, available) });
@@ -55,7 +66,8 @@
                     await Promise.race([audio.start({ automatic }), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('เตรียมไมค์นานเกินไป กรุณาเปิดไมค์ใหม่')), 15000); })]);
                 } finally { clearTimeout(timer); }
                 if (!this.active(epoch)) { audio.close(); return false; }
-                const data = await this.json('/api/voice-session', { device: this.device }, epoch);
+                this.setState('INIT', 'กำลังโหลดโมเดลเสียงบนเซิร์ฟเวอร์');
+                const data = await this.json('/api/voice-session', { device: this.device }, epoch, SESSION_START_TIMEOUT_MS);
                 this.sessionId = data.sessionId; this.engine = data.engine;
                 this.keepAliveTimer = setInterval(() => { this.json('/api/voice-session/ping', this.body(), epoch, 5000).catch(error => this.fatal(error, epoch)); }, 4 * 60 * 1000);
                 if (!handsFree) {

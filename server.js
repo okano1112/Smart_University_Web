@@ -45,16 +45,21 @@ const upload = multer({
 
 function voiceRoute(handler) {
   return async (req, res) => {
-    try { res.json(await handler(req)); }
+    try {
+      const response = await handler(req, res);
+      if (!res.destroyed) res.json(response);
+    }
     catch (error) {
+      if (res.destroyed) return;
       const timedOut = error.name === 'AbortError' || error.name === 'TimeoutError';
       res.status(timedOut ? 504 : error.status || 500).json({ success: false,
         message: timedOut ? 'ประมวลผลเสียงนานเกินไป กรุณาลองใหม่' : error.status ? error.message : 'ระบบเสียงขัดข้อง กรุณาลองใหม่' });
     }
   };
 }
-app.post('/api/voice-session', voiceRoute(async req => {
+app.post('/api/voice-session', voiceRoute(async (req, res) => {
   await localVoice.start();
+  if (res.destroyed) return;
   return { sessionId: voiceSessions.create(req.body.device), engine: 'LOCAL_WHISPER', wakeWord: true, duration: 12 };
 }));
 app.post('/api/voice-session/cancel', voiceRoute(req => {

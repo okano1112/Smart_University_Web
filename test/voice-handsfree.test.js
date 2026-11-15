@@ -102,6 +102,7 @@ test('transient session loss recovers without changing the saved opt-in', async 
   h.controller.stop(); h.manager.recover(Object.assign(new Error('session expired'), { status: 410 }));
   assert.equal(h.saved.get(preferenceKey), 'on');
   assert.equal(h.controller.state, 'OFF');
+  assert.match(h.calls.at(-1).label, /session expired.*ลองใหม่ใน 1 วินาที/);
   await new Promise(resolve => setTimeout(resolve, 1050));
   assert.equal(h.controller.state, 'WAIT_WAKE');
   assert.equal(h.calls.filter(call => call.handsFree).length, 2);

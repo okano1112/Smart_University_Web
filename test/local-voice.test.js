@@ -6,6 +6,20 @@ const path = require('node:path');
 const { LocalVoice } = require('../offline-voice');
 const { wav } = require('../public/js/voice-audio');
 
+test('a server missing the configured Python interpreter reports a setup error', async () => {
+  const worker = new LocalVoice();
+  const original = process.env.VOICE_PYTHON;
+  process.env.VOICE_PYTHON = path.join(__dirname, 'nonexistent-python');
+  try {
+    await assert.rejects(worker.start(), { status: 503, message: 'เซิร์ฟเวอร์ไม่พบ Python สำหรับระบบเสียง' });
+    assert.equal(worker.child, null);
+  } finally {
+    if (original === undefined) delete process.env.VOICE_PYTHON;
+    else process.env.VOICE_PYTHON = original;
+    worker.close();
+  }
+});
+
 test('real local TFLite worker: command fixtures, silence, invalid audio, cancellation and recovery', { timeout: 100000 }, async () => {
   const worker = new LocalVoice({engine:'tflite'});
   try {

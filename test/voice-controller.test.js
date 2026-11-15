@@ -82,6 +82,20 @@ test('automatic autoplay restriction preserves gesture-required hint',async()=>{
  assert.equal(await h.c.start(true,{automatic:true}),false);assert.equal(h.c.lastStartError.code,'VOICE_GESTURE_REQUIRED');assert.equal(h.c.state,'OFF');
 });
 
+test('startup distinguishes microphone and server model loading and reports a proxy error', async () => {
+ const phases = [], faults = [];
+ const h = fixture({
+  render: (phase, _handsFree, label) => { if (phase === 'INIT') phases.push(label); },
+  onHandsFreeFault: error => faults.push(error),
+  fetch: async () => new Response('<html>Service unavailable</html>', { status: 502 })
+ });
+ assert.equal(await h.c.start(true), false);
+ assert.deepEqual(phases, ['กำลังเตรียมไมโครโฟน', 'กำลังโหลดโมเดลเสียงบนเซิร์ฟเวอร์']);
+ assert.equal(faults[0].status, 502);
+ assert.match(faults[0].message, /HTTP 502/);
+ assert.equal(h.c.state, 'OFF');
+});
+
 test('a second command captured during inference is processed once after the first reply',async()=>{
  const h=fixture();await h.c.start(true);let release;
  let calls=0;h.setRespond(async form=>{calls++;if(calls===1)await new Promise(r=>release=r);return{requestId:form.get('requestId'),wakeVerified:true,success:true,nextState:{power:true,temp:25,mode:0,fan:3},label:'ตั้ง 25',feedback:{text:'25',clips:['temp-25']}};});

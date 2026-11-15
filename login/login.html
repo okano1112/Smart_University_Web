@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#A3131A">
+  <title>เข้าสู่ระบบ | ห้องประชุม BimClub</title>
+  <link rel="stylesheet" href="/login.css">
+</head>
+<body>
+  <header class="login-masthead">
+    <p class="login-wordmark"><strong>BimClub</strong><span aria-hidden="true">/</span><span>ROOM CONTROL</span></p>
+  </header>
+  <main class="login-main">
+    <section class="login-panel" aria-labelledby="login-title">
+      <h1 id="login-title">เข้าสู่ระบบ</h1>
+      <p class="login-description">ระบบควบคุมเครื่องปรับอากาศห้องประชุม BimClub</p>
+      <div id="login-message" class="login-message" role="alert"><!--LOGIN_MESSAGE--></div>
+      <form method="post" action="/login" aria-describedby="login-message">
+        <label for="username">ชื่อผู้ใช้</label>
+        <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+        <label for="password">รหัสผ่าน</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+        <button type="submit">เข้าสู่ระบบ</button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

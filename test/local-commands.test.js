@@ -104,3 +104,66 @@ test('voice recovery does not infer unrelated NG, negated actions or status ques
  ]) assert.equal(parseSpeech(text).commands, undefined, text);
  assert.deepEqual(parseSpeech('เอ็นจี้เปิดแอร์ได้ไหม').commands, ['ON']);
 });
+
+test('room questions distinguish the room sensor from the AC setting and never take action', () => {
+ for (const [text, query, hasWakeWord] of [
+  ['เอ็นจี้ ตอนนี้อุณหภูมิเท่าไหร่', 'room_temperature', true],
+  ['เอ็นจี้ตอนนี้อุณภูมิเท่าไร', 'room_temperature', true],
+  ['เอ็นจี้ อุณหภูมิห้องตอนนี้เท่าไหร่ครับ', 'room_temperature', true],
+  ['ตอนนี้ห้องกี่องศา', 'room_temperature', false],
+  ['ช่วยบอกอุณหภูมิห้องหน่อย', 'room_temperature', false],
+  ['กี่องศา', 'room_temperature', false],
+  ['เอ็นจี้ในห้องมีกี่คน', 'people_count', true],
+  ['เอ็นจี้ คนกี่คน', 'people_count', true],
+  ['เอ็นจี้ คนในห้องมีกี่คน', 'people_count', true],
+  ['ในห้องมีคนอยู่เท่าไหร่ครับ', 'people_count', false],
+  ['มีคนกี่คน', 'people_count', false],
+  ['ถามว่าความชื้นเท่าไหร่', 'room_humidity', false],
+  ['เอ็นจี้ความชื้นกี่เปอร์เซ็นต์', 'room_humidity', true],
+  ['ตั้งแอร์ไว้กี่องศา', 'ac_setpoint', false],
+  ['เอ็นจี้แอร์ตั้งไว้เท่าไหร่', 'ac_setpoint', true],
+  ['แอร์เปิดอยู่ไหม', 'ac_power', false],
+  ['เอ็นจี้เปิดแอร์อยู่หรือไม่', 'ac_power', true],
+  ['เอ็นจี้ เครื่องปรับอากาศปิดอยู่หรือเปล่า', 'ac_power', true],
+  ['Engi, is the AC on?', 'ac_power', true],
+  ['Engi what is the room temperature?', 'room_temperature', true],
+  ['Engi how many people are in the room?', 'people_count', true],
+ ]) assert.deepEqual(parseSpeech(text), { query, hasWakeWord }, text);
+ assert.deepEqual(parseSpeech('กี่องศา', { expectingTemperature: true }), { query: 'room_temperature', hasWakeWord: false });
+});
+
+test('a query mixed with a control or another query does not execute the embedded control', () => {
+ for (const text of ['เอ็นจี้เปิดแอร์แล้วบอกอุณหภูมิเท่าไหร่', 'เอ็นจี้ในห้องมีกี่คนแล้วปิดแอร์',
+  'เอ็นจี้แอร์เปิดไหมแล้วปรับพัดลมแรง', 'เอ็นจี้ปิดแอร์อยู่หรือยังแล้วตั้งอุณหภูมิ25องศา',
+  'เอ็นจี้ ตอนนี้อุณหภูมิเท่าไหร่แล้วตั้งแอร์ไว้กี่องศา', 'Engi, is the AC on? Turn it off',
+  'เอ็นจี้ปรับอุณหภูมิกี่องศาดี', 'เอ็นจี้ ตอนนี้แอร์ตั้งไว้25องศาใช่หรือเปล่า',
+  'เอ็นจี้ ตั้งอุณหภูมิ 25 องศาหรือเปล่า', 'เอ็นจี้เปิดแอร์25องศาหรือยัง', 'เอ็นจี้แอร์เปิดใช่หรือไม่']) {
+  const intent = parseSpeech(text);
+  assert.ok(intent.hasWakeWord, text);
+  assert.equal(intent.commands, undefined, text);
+  assert.equal(intent.askTemperature, undefined, text);
+  assert.equal(intent.query, undefined, text);
+ }
+ for (const text of ['เอ็นจี้ไม่ต้องเปิดแอร์', 'เอ็นจี้ อย่าปิดแอร์ ตอนนี้อุณหภูมิเท่าไหร่']) assert.equal(parseSpeech(text).reason, 'negated');
+ assert.deepEqual(parseSpeech('เอ็นจี้เปิดแอร์ได้ไหม').commands, ['ON']);
+ assert.equal(parseSpeech('เอ็นจี้ปรับอุณหภูมิ').askTemperature, true);
+});
+
+test('inline questions follow the existing neutral wake evidence gate without weakening it', () => {
+ const prediction = (top, ...alternatives) => ({
+  engine:'LOCAL_WHISPER', accepted:true, noSpeechProbability:.02,
+  wakeCandidates:[top,...alternatives].map(([transcript,score])=>({transcript,score}))
+ });
+ const exact = prediction(['เอ็นจี้ตอนนี้อุณหภูมิเท่าไหร่', -.2]);
+ assert.equal(parseSpeech(verifiedWakeTranscript(exact)).query, 'room_temperature');
+ const matching = prediction(['เอ็นที่ในห้องมีกี่คน', -.31], ['เอ็นจี้ในห้องมีกี่คน', -.37]);
+ assert.equal(parseSpeech(verifiedWakeTranscript(matching)).query, 'people_count');
+ assert.equal(verifiedWakeTranscript(prediction(['ในห้องมีกี่คน', -.1], ['เอ็นจี้ในห้องมีกี่คน', -.15])), null);
+ assert.equal(verifiedWakeTranscript(prediction(['เอ็นที่ในห้องมีกี่คน', -.31])), null);
+ assert.equal(verifiedWakeTranscript(prediction(['เอ็นจี้เปิดแอร์', -.19], ['เอ็นจี้แอร์เปิดอยู่ไหม', -.30])), null);
+ assert.equal(verifiedWakeTranscript({ ...exact, noSpeechProbability:.6 }), null);
+ assert.equal(verifiedWakeTranscript(prediction(['เอ็นจี้ยง คนกี่คน', -.21])), null);
+ const recover = { ...prediction(['เอ็นที่แอร์เปิดอยู่ไหม', -.23]), wakeAcoustics:[{name:'เอ็นจี้',score:-.85,consonant:.06,ending:.66}] };
+ assert.equal(parseSpeech(verifiedWakeTranscript(recover)).query, 'ac_power');
+ assert.equal(verifiedWakeTranscript({ ...recover, wakeCandidates:[...recover.wakeCandidates,{transcript:'เอ็นที่เปิดแอร์',score:-.24}] }), null);
+});

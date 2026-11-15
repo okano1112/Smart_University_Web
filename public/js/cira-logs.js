@@ -203,7 +203,7 @@
         request = controller; refresh.setAttribute('aria-busy', 'true');
         const timeout = setTimeout(() => controller.abort(), REQUEST_MS);
         try {
-            const response = await fetch('/api/cira/logs', { cache: 'no-store', headers: { Accept: 'application/json' }, signal: controller.signal });
+            const response = await (window.SmartDashboardFetch || fetch)('/api/cira/logs', { cache: 'no-store', headers: { Accept: 'application/json' }, signal: controller.signal });
             if (!response.ok) throw new Error('Bridge diagnostics unavailable');
             const next = parseBridge(await response.json());
             if (request !== controller || !canRun()) return;

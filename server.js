@@ -1,8 +1,8 @@
 require('dotenv').config();
 const express = require('express');
 const multer = require('multer');
-const cors = require('cors');
 const path = require('path');
+const { installRoomLogin } = require('./room-login');
 const { VoiceSessions, VoiceError, validAc } = require('./voice-session');
 const voiceSessions = new VoiceSessions();
 const { LocalVoice, commandFor } = require('./offline-voice');
@@ -23,8 +23,8 @@ const acScheduler = new AcScheduler({
 });
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+installRoomLogin(app, { accountFile: process.env.BIMCLUB_LOGIN_ACCOUNT_FILE });
+app.use(express.json({ limit: '100kb' }));
 app.use('/api/cooling-forecast', createCoolingForecastRouter());
 app.use('/api/schedules', createScheduleRouter({ scheduler: acScheduler }));
 app.get('/api/cira/logs', require('./cira-logs-route').readCiraLogs);
@@ -97,6 +97,13 @@ app.post('/api/voice-command', upload.single('audio'), voiceRoute(async req => {
     const intent = result.engine === 'LOCAL_WHISPER' && result.accepted
       ? parseSpeech(transcript, { expectingTemperature: Date.now() < (session.temperatureUntil || 0) }) : null;
     if (waitingForWake && !intent?.hasWakeWord) return { success:false, ignored:true, waitingForWake:true, engine, latencyMs };
+    // The browser reads the requested live value after recognition. A query
+    // never constructs an AC state or uses the command mapping fallback.
+    if (intent?.query) {
+      session.temperatureUntil = 0;
+      session.wake = null;
+      return { success: true, query: intent.query, ...wakeEvidence, engine, transcript, latencyMs };
+    }
     const ticket = () => stage === 'direct' ? {} : { wakeToken: voiceSessions.issueWake(session) };
     if (intent?.wakeOnly) return { success: false, wakeOnly: true, ...ticket(), ...wakeEvidence, engine, transcript, latencyMs,
       feedback: { text: 'ครับ พูดได้เลยครับ', clips: ['wake-ready'] } };
@@ -123,12 +130,14 @@ app.post('/api/voice-command', upload.single('audio'), voiceRoute(async req => {
   });
 }));
 app.use((error, req, res, next) => {
+  if (res.headersSent) return next(error);
   if (req.path.startsWith('/api/voice')) return res.status(400).json({ success: false, message: 'ไม่สามารถรับไฟล์เสียงได้ กรุณาพูดใหม่' });
-  next(error);
+  const status = error.status >= 400 && error.status < 500 ? error.status : 500;
+  return res.status(status).json({ success: false, message: status === 500 ? 'ระบบขัดข้อง กรุณาลองใหม่' : 'คำขอไม่ถูกต้อง' });
 });
 
 const PORT = process.env.PORT || 3000;
-if (require.main === module) app.listen(PORT, () => {
+if (require.main === module) app.listen(PORT, '127.0.0.1', () => {
   acScheduler.start().then(() => scheduleMqtt.start()).catch(error => console.error('[Schedule]', error.message));
   // Warm the local model once; no external AI endpoint is used.
   localVoice.start().then(() => console.log('Local Whisper พร้อมรับคำสั่ง • ไม่ใช้ AI API ภายนอก')).catch(error => console.error(error.message));

@@ -42,13 +42,79 @@ const temperatureHistory = [];
 const targetHistory = [];
 const comfortHistory = [];
 let peopleStableSince = 0;
-const coolingForecast = new SmartCoolingForecastClient.ForecastClient({ fetch: (...args) => fetch(...args), onChange: () => renderForecast() });
+const coolingForecast = new SmartCoolingForecastClient.ForecastClient({ fetch: appFetch, onChange: () => renderForecast() });
 let assumedCoolingRate = .1;
 try { const saved=Number(localStorage.getItem('smartCoolingRateV1')); if(saved>=.02&&saved<=.5)assumedCoolingRate=saved; } catch(_) {}
 let noticeTimer = null;
 let reconnectProbeTimer = null;
 let scheduleClient = null;
 let activityClient = null;
+let sessionAuthorized = false, sessionEnded = false, sessionSuspended = false, sessionRevision = 0;
+let sessionProbe = null, mqttRevision = 0, commandQueue = Promise.resolve(), queuedCommands = 0;
+
+async function appFetch(resource, options) {
+    if (sessionEnded || sessionSuspended) {
+        // Best-effort release for a voice session during navigation. Never
+        // treat its response as a new login state or restart any resources.
+        if (resource === '/api/voice-session/cancel' && options?.method === 'POST' && options.keepalive) return fetch(resource, options);
+        throw new DOMException('Dashboard closed', 'AbortError');
+    }
+    const revision = sessionRevision;
+    const response = await fetch(resource, options);
+    if (revision !== sessionRevision || sessionEnded || sessionSuspended) throw new DOMException('Dashboard closed', 'AbortError');
+    const url = new URL(typeof resource === 'string' || resource instanceof URL ? resource : resource.url, location.href);
+    if (response.status === 401 && url.origin === location.origin && (!response.url || new URL(response.url).origin === location.origin)) {
+        pauseDashboardSession(true);
+        location.replace('/login');
+    }
+    return response;
+}
+window.SmartDashboardFetch = appFetch;
+
+function pauseDashboardSession(permanent = false) {
+    sessionRevision++; sessionAuthorized = false; sessionEnded ||= permanent; sessionSuspended = !sessionEnded;
+    sessionProbe = null;
+    if (permanent) {
+        handsFreeStartup.destroy();
+        scheduleClient?.destroy();
+        activityClient?.stop();
+    } else handsFreeStartup.pause();
+    stopMqtt();
+    state.pending = null; state.requested = null;
+    coolingForecast.reset();
+}
+
+async function checkDashboardSession(signal) {
+    const revision = sessionRevision;
+    try {
+        const timeout = AbortSignal.timeout(4000);
+        const response = await appFetch('/api/auth/session', {
+            cache: 'no-store', credentials: 'same-origin', redirect: 'error',
+            signal: signal ? AbortSignal.any([signal, timeout]) : timeout
+        });
+        return response.status === 204 && revision === sessionRevision && !sessionEnded && !sessionSuspended && !timeout.aborted && !signal?.aborted;
+    } catch (_) { return false; }
+}
+
+function refreshDashboardSession() {
+    if (sessionEnded || sessionSuspended || sessionProbe) return sessionProbe;
+    const revision = sessionRevision;
+    const pending = checkDashboardSession().then(ok => {
+        if (!ok || revision !== sessionRevision || sessionEnded || sessionSuspended) return;
+        if (!sessionAuthorized) {
+            sessionAuthorized = true;
+            connectMqtt(); renderAll();
+            if (!scheduleClient) scheduleClient = SmartAcSchedules.install({ document, fetch: appFetch, notice,
+                connection: () => ({ mqttUrl: settings.mqttUrl, command: settings.command, status: settings.status }), current: currentDesired });
+            else scheduleClient.refresh();
+            if (!activityClient) activityClient = window.CiraActivity?.install({ metrics: comfortMetrics, apply: applyComfort, fetch: appFetch });
+            else activityClient.refresh();
+            handsFreeStartup.resume();
+        }
+    }).finally(() => { if (sessionProbe === pending) sessionProbe = null; });
+    sessionProbe = pending;
+    return pending;
+}
 
 function logEvent(kind, msg) {
     const entry = { at: new Date(), kind, msg };
@@ -92,9 +158,12 @@ function readableAge(ms) {
     const sec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
     return sec < 60 ? `${sec} วินาทีที่แล้ว` : `${Math.floor(sec / 60)} นาทีที่แล้ว`;
 }
-function isFreshSensor(which) { return !!state.sensorAt[which] && Date.now() - state.sensorAt[which] < SENSOR_STALE_MS }
+function isFreshSensor(which, now = Date.now()) {
+    const at = state.sensorAt[which];
+    return at > 0 && now >= at && now - at < SENSOR_STALE_MS;
+}
 // Direct manual control needs only an active MQTT socket. ESP32 state may be unknown.
-function commandAllowed() { return state.mqttConnected }
+function commandAllowed() { return sessionAuthorized && !sessionEnded && !sessionSuspended && state.mqttConnected }
 function currentDesired() { return state.requested || state.ac }
 
 function loadSettings() {
@@ -153,18 +222,20 @@ function resetSettings() {
     $('setting-user').value = $('setting-pass').value = '';
     notice('เติมค่าตั้งต้นแล้ว กรุณากด “บันทึกและเชื่อมต่อใหม่”', 'info');
 }
-function resetPeopleConnection() {
-    state.people = null; state.sensorAt.people = 0;
+function resetTelemetryConnection() {
+    state.people = null; state.sensorAt = { temp: 0, humid: 0, people: 0 };
     peopleStableSince = 0; comfortHistory.length = 0;
     window.SmartCiraLogs?.recordBrowser({ stage: 'disconnected', at: Date.now() });
 }
 function stopMqtt() {
+    mqttRevision++;
     if (reconnectProbeTimer) { clearTimeout(reconnectProbeTimer); reconnectProbeTimer = null }
     if (mqttClient) { const old = mqttClient; mqttClient = null; try { old.end(true) } catch (_) { } }
     state.mqttConnected = false; state.deviceOnline = false; state.statusQuality = 'unknown';
-    resetPeopleConnection();
+    resetTelemetryConnection();
 }
 function connectMqtt() {
+    if (!sessionAuthorized || sessionEnded || sessionSuspended || mqttClient) return;
     if (typeof window.mqtt === 'undefined') {
         notice('ไม่พบไลบรารี MQTT.js — ต้องใช้อินเทอร์เน็ตเพื่อโหลดไฟล์ไลบรารี หรือโฮสต์ไฟล์ไว้ภายในเครือข่าย', 'error', 0);
         logEvent('error', 'ไม่สามารถโหลด MQTT.js ได้'); renderAll(); return;
@@ -179,6 +250,7 @@ function connectMqtt() {
     const target = mqttClient;
     target.on('connect', () => {
         if (mqttClient !== target) return;
+        mqttRevision++;
         state.mqttConnected = true;
         window.SmartCiraLogs?.recordBrowser({ stage: 'connected', at: Date.now() });
         state.deviceOnline = false;
@@ -188,6 +260,7 @@ function connectMqtt() {
         state.lastStatusAt = 0;
         logEvent('info', 'เชื่อมต่อ MQTT Broker สำเร็จ กำลังขอสถานะ ESP32');
         target.subscribe([settings.status, settings.temp, settings.humid, settings.people], { qos: 0 }, err => {
+            if (mqttClient !== target) return;
             if (err) { notice('Subscribe MQTT ไม่สำเร็จ: ' + err.message, 'error'); logEvent('error', 'Subscribe ไม่สำเร็จ'); return }
             if (reconnectProbeTimer) clearTimeout(reconnectProbeTimer);
             reconnectProbeTimer = setTimeout(() => requestDeviceStatus(false), 750);
@@ -200,7 +273,8 @@ function connectMqtt() {
     });
     const disconnect = () => {
         if (mqttClient !== target) return;
-        if (state.mqttConnected) { logEvent('warning', 'Broker ขาดการเชื่อมต่อ'); resetPeopleConnection(); }
+        mqttRevision++;
+        if (state.mqttConnected) { logEvent('warning', 'Broker ขาดการเชื่อมต่อ'); resetTelemetryConnection(); }
         state.mqttConnected = false; state.deviceOnline = false; state.statusQuality = 'unknown';
         if (state.pending) { voiceCommandResult(state.pending.id, false, 'การเชื่อมต่ออุปกรณ์ขาดหาย • ยังไม่ยืนยันคำสั่ง'); state.pending = null; state.requested = null; state.verifyState = 'timeout' }
         renderAll();
@@ -304,7 +378,33 @@ function requestDeviceStatus(userInitiated = false) {
         logEvent('info', 'ขอสถานะจาก ESP32 โดยตรง (ไม่ยิง IR)');
     }
 }
-function sendAcCommand(next, label) {
+function sendAcCommand(change, label, { validate = () => true, signal } = {}) {
+    if (!commandAllowed()) {
+        notice(sessionAuthorized ? 'MQTT Offline: ไม่ได้ส่งคำสั่ง กรุณาตรวจสอบการเชื่อมต่อ'
+            : 'ยังไม่ได้ยืนยันเซสชัน จึงไม่ได้ส่งคำสั่ง', 'warning');
+        return Promise.resolve(false);
+    }
+    if (queuedCommands >= 5) return Promise.resolve(false);
+    const revision = sessionRevision, connectionRevision = mqttRevision, connection = mqttClient;
+    const deadline = Date.now() + 6000;
+    const stillValid = () => commandAllowed() && connection === mqttClient && revision === sessionRevision &&
+        connectionRevision === mqttRevision && Date.now() <= deadline && !signal?.aborted && validate();
+    queuedCommands++;
+    commandQueue = commandQueue.then(async () => {
+        if (!stillValid()) return false;
+        if (!await checkDashboardSession(signal)) {
+            if (stillValid()) notice('ตรวจสอบการเข้าสู่ระบบไม่ได้ จึงไม่ได้ส่งคำสั่ง', 'warning');
+            return false;
+        }
+        if (!stillValid()) return false;
+        // Manual deltas compose in arrival order after checks; a stale voice
+        // or advice command instead fails its captured-state validation above.
+        const intent = typeof change === 'function' ? change(currentDesired()) : { next: change, label };
+        return intent ? publishAcCommand(intent.next, intent.label) : false;
+    }).catch(() => false).finally(() => { queuedCommands--; });
+    return commandQueue;
+}
+function publishAcCommand(next, label) {
     if (!next || typeof next.power !== 'boolean' || !Number.isInteger(next.temp) || !numberInRange(next.temp, MIN_TEMP, MAX_TEMP) || !Number.isInteger(next.mode) || next.mode < 0 || next.mode > 2 || !Number.isInteger(next.fan) || next.fan < 0 || next.fan > 3) {
         notice('ค่าคำสั่งไม่ถูกต้อง', 'error'); return false;
     }
@@ -318,7 +418,7 @@ function sendAcCommand(next, label) {
     state.pending = { id, expected: { ...next }, label, createdAt: Date.now(), startedAt: Date.now(), stage: 'DIRECT_SENT' };
     state.verifyState = 'sending';
     const sent = sendMqtt(settings.command, payload, err => {
-        if (!err) return;
+        if (!err || sessionEnded || sessionSuspended) return;
         logEvent('error', 'MQTT Publish ผิดพลาด: ' + err.message);
         voiceCommandResult(id, false, 'ส่งคำสั่ง MQTT ไม่สำเร็จ • กรุณาตรวจการเชื่อมต่อ');
         if (state.pending?.id === id) { state.pending = null; state.requested = null; state.verifyState = 'timeout'; renderAll() }
@@ -334,31 +434,31 @@ function sendAcCommand(next, label) {
     return { id };
 }
 function handlePowerToggle() {
-    const current = currentDesired();
-    const power = current.power === null ? true : !current.power;
-    sendAcCommand({ ...current, power }, power ? 'เปิดแอร์' : 'ปิดแอร์');
+    void sendAcCommand(current => {
+        const power = current.power === null ? true : !current.power;
+        return { next: { ...current, power }, label: power ? 'เปิดแอร์' : 'ปิดแอร์' };
+    });
 }
 function adjustTemperature(delta) {
-    const current = currentDesired();
-    if (current.power !== true) return;
-    const t = current.temp + delta;
-    if (t < MIN_TEMP || t > MAX_TEMP) return;
-    sendAcCommand({ ...current, temp: t }, `ปรับอุณหภูมิ ${t}°C`);
+    void sendAcCommand(current => {
+        const t = current.temp + delta;
+        return current.power === true && numberInRange(t, MIN_TEMP, MAX_TEMP)
+            ? { next: { ...current, temp: t }, label: `ปรับอุณหภูมิ ${t}°C` } : null;
+    });
 }
 function selectQuickTemp(t) {
     if (!numberInRange(t, MIN_TEMP, MAX_TEMP)) return;
-    const current = currentDesired();
-    sendAcCommand({ ...current, power: true, temp: t }, `ตั้งแอร์ ${t}°C`);
+    void sendAcCommand(current => ({ next: { ...current, power: true, temp: t }, label: `ตั้งแอร์ ${t}°C` }));
 }
 function chooseAcMode(mode) {
-    const current = currentDesired();
-    if (current.power !== true || ![0, 1, 2].includes(mode)) return;
-    sendAcCommand({ ...current, mode }, `เปลี่ยนโหมด ${MODE_NAMES[mode]}`);
+    if (![0, 1, 2].includes(mode)) return;
+    void sendAcCommand(current => current.power === true
+        ? { next: { ...current, mode }, label: `เปลี่ยนโหมด ${MODE_NAMES[mode]}` } : null);
 }
 function chooseAcFan(fan) {
-    const current = currentDesired();
-    if (current.power !== true || current.mode !== 0 || ![0, 1, 2, 3].includes(fan)) return;
-    sendAcCommand({ ...current, fan }, `ปรับแรงลม ${FAN_NAMES[fan]}`);
+    if (![0, 1, 2, 3].includes(fan)) return;
+    void sendAcCommand(current => current.power === true && current.mode === 0
+        ? { next: { ...current, fan }, label: `ปรับแรงลม ${FAN_NAMES[fan]}` } : null);
 }
 
 function renderThermostat() {
@@ -629,39 +729,67 @@ function comfortMetrics() {
 }
 async function applyComfort({ target }) {
     const metrics = comfortMetrics(), settingRef = settings, connection = mqttClient, revision = state.requestCount;
-    const reject = () => { notice('ข้อมูลเปลี่ยนแล้ว กรุณาตรวจคำแนะนำล่าสุดก่อนกดใช้', 'warning'); return false; };
+    const reject = () => { if (!sessionEnded && !sessionSuspended) notice('ข้อมูลเปลี่ยนแล้ว กรุณาตรวจคำแนะนำล่าสุดก่อนกดใช้', 'warning'); return false; };
     if (!metrics.canApply || !Number.isInteger(target) || target < MIN_TEMP || target > MAX_TEMP ||
         Math.abs(target - metrics.ac.temp) !== 1) return reject();
     try {
-        const response = await fetch('/api/comfort/recommendation', {
+        const response = await appFetch('/api/comfort/recommendation', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(metrics), signal: AbortSignal.timeout(3500), cache: 'no-store'
         });
         if (!response.ok) return reject();
         const { recommendation, pose } = await response.json();
-        const latest = comfortMetrics();
-        if (!latest.canApply || settings !== settingRef || mqttClient !== connection || state.requestCount !== revision ||
-            !pose?.activity || pose.stale || pose.activity.total_people !== latest.people.value ||
-            metrics.observedAt - metrics.peopleStableMs !== latest.observedAt - latest.peopleStableMs ||
-            recommendation?.status !== 'suggested' || recommendation.target !== target ||
-            recommendation.currentTarget !== latest.ac.temp ||
-            ['power', 'mode', 'fan', 'temp'].some(key => metrics.ac[key] !== latest.ac[key]) ||
-            ['temperature', 'humidity', 'people'].some(key => metrics[key].value !== latest[key].value)) return reject();
-        return Boolean(sendAcCommand({ ...state.ac, temp: target }, `ใช้อุณหภูมิแนะนำ ${target}°C`));
+        const receivedAt = Date.now();
+        const validate = () => {
+            const latest = comfortMetrics();
+            return latest.canApply && settings === settingRef && mqttClient === connection && state.requestCount === revision &&
+                pose?.activity && !pose.stale && Number.isFinite(pose.ageMs) && pose.ageMs + (Date.now() - receivedAt) <= 5000 && pose.activity.total_people === latest.people.value &&
+                metrics.observedAt - metrics.peopleStableMs === latest.observedAt - latest.peopleStableMs &&
+                recommendation?.status === 'suggested' && recommendation.target === target && recommendation.currentTarget === latest.ac.temp &&
+                ['power', 'mode', 'fan', 'temp'].every(key => metrics.ac[key] === latest.ac[key]) &&
+                ['temperature', 'humidity', 'people'].every(key => metrics[key].value === latest[key].value);
+        };
+        if (!validate()) return reject();
+        return Boolean(await sendAcCommand({ ...state.ac, temp: target }, `ใช้อุณหภูมิแนะนำ ${target}°C`, { validate })) || reject();
     } catch (_) { return reject(); }
 }
 window.addEventListener('DOMContentLoaded', () => {
     $('ui-room-name').textContent = ROOM_NAME;
-    loadSettings(); updateClock(); initChart(); renderAll();
-    connectMqtt();
-    setInterval(() => { updateClock() }, 30000);
-    setInterval(healthTick, 1000);
-    setInterval(() => { if (state.mqttConnected) requestDeviceStatus(false) }, 30000);
-    scheduleClient = SmartAcSchedules.install({ document, fetch: (...args) => fetch(...args), notice, connection: () => ({ mqttUrl: settings.mqttUrl, command: settings.command, status: settings.status }), current: currentDesired });
-    activityClient = window.CiraActivity?.install({ metrics: comfortMetrics, apply: applyComfort });
+    loadSettings(); updateClock(); initChart(); renderThermostat(); renderEnvironment(); renderConnection();
+    $('btn-logout')?.closest('form')?.addEventListener('submit', () => pauseDashboardSession(true));
+    handsFreeStartup.install();
+    void refreshDashboardSession();
+    setInterval(() => { if (!sessionEnded && !sessionSuspended) updateClock(); }, 30000);
+    setInterval(() => { if (sessionAuthorized) healthTick(); }, 1000);
+    setInterval(() => { if (!document.hidden) void refreshDashboardSession(); }, 15000);
+    setInterval(() => { if (commandAllowed()) requestDeviceStatus(false); }, 30000);
+});
+document.addEventListener('visibilitychange', () => { if (!document.hidden) void refreshDashboardSession(); });
+window.addEventListener('pagehide', () => { if (!sessionEnded) pauseDashboardSession(); });
+window.addEventListener('pageshow', event => {
+    if (!event.persisted) return;
+    if (sessionEnded) { location.replace('/login'); return; }
+    if (!sessionSuspended) pauseDashboardSession();
+    sessionSuspended = false;
+    void refreshDashboardSession();
 });
 
 // Presentation is separate from local voice capture and its command/session safeguards.
+function answerRoomQuestion(query) {
+    const now = Date.now();
+    let reading = null;
+    if (state.mqttConnected) {
+        if (query === 'room_temperature' && isFreshSensor('temp', now)) reading = state.roomTemp;
+        else if (query === 'room_humidity' && isFreshSensor('humid', now)) reading = state.humid;
+        else if (query === 'people_count' && isFreshSensor('people', now)) reading = state.people;
+        else if ((query === 'ac_setpoint' || query === 'ac_power') && !state.pending && state.deviceOnline &&
+            state.statusQuality === 'fresh' && state.lastStatusAt > 0 && now >= state.lastStatusAt && now - state.lastStatusAt < DEVICE_STALE_MS) {
+            reading = query === 'ac_power' ? state.ac.power : state.ac.temp;
+        }
+    }
+    return SmartVoiceFeedback.answerQuestion(query, reading);
+}
+
 const voiceLabels = {
     INIT: 'กำลังเตรียมไมค์และโมเดล',
     WAIT_CONTINUOUS: 'กำลังฟังคำเรียก “เอ็นจี้” หรือ “Engi”', READY: 'พูดได้เลย',
@@ -670,11 +798,11 @@ const voiceLabels = {
     SPEAKING: 'กำลังพูดตอบกลับ', MIC_PAUSED: 'ไมค์หยุดส่งเสียง · รอไมค์กลับมา', RECOVERING: 'กำลังเชื่อมระบบเสียงใหม่'
 };
 const voiceController = new SmartVoiceController({
-    fetch: (...args) => fetch(...args), id: () => crypto.randomUUID(),
+    fetch: appFetch, id: () => crypto.randomUUID(), canStart: () => sessionAuthorized && !sessionEnded && !sessionSuspended,
     audio: callbacks => new SmartVoiceAudio.VoiceAudio(callbacks), wav: SmartVoiceAudio.wav,
     device: () => JSON.stringify([settings.mqttUrl, settings.command]),
     current: () => ({ ...currentDesired() }), revision: () => state.requestCount, pending: () => !!state.pending,
-    send: sendAcCommand, notice, log: logEvent, feedback: SmartVoiceFeedback.describe, variant: SmartVoiceFeedback.variant,
+    send: sendAcCommand, answer: answerRoomQuestion, notice, log: logEvent, feedback: SmartVoiceFeedback.describe, variant: SmartVoiceFeedback.variant,
     onHandsFreeFault: error => handsFreeStartup.recover(error),
     onDirectEnd: () => handsFreeStartup.resume(),
     render: (phase, handsFree, label) => {
@@ -702,10 +830,12 @@ const handsFreeStartup = new SmartHandsFreeStartup({
     permission: () => navigator.permissions.query({ name: 'microphone' })
 });
 function toggleAlwaysOnWakeMode() {
+    if (!sessionAuthorized) return;
     if (handsFreeStartup.enabled) handsFreeStartup.stopByUser();
     else void handsFreeStartup.startByUser();
 }
 function handleVoiceButtonClick() {
+    if (!sessionAuthorized) return;
     if (voiceController.state !== 'OFF' && !voiceController.handsFree) {
         voiceController.finishDirect();
     } else {
@@ -715,6 +845,3 @@ function handleVoiceButtonClick() {
 }
 function voiceCommandResult(id, success, message) { voiceController.deviceResult(id, success, message); }
 $('voice-btn-text').setAttribute('aria-live', 'polite');
-// Restore the user's hands-free preference without bypassing browser mic/audio permission.
-if (document.readyState === 'loading') window.addEventListener('DOMContentLoaded', () => handsFreeStartup.install(), { once: true });
-else handsFreeStartup.install();

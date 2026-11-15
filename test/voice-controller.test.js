@@ -3,14 +3,14 @@ const test=require('node:test'),assert=require('node:assert/strict');
 const Controller=require('../public/js/voice-controller');
 const {wav}=require('../public/js/voice-audio');
 const tick=()=>new Promise(r=>setTimeout(r,0));
-function fixture(){
- const events=[],sent=[];let count=0,revision=0,destination='room-a',current={power:true,temp:24,mode:0,fan:3};
+function fixture(options={}){
+ const events=[],sent=[],logged=[];let count=0,revision=0,destination='room-a',current={power:true,temp:24,mode:0,fan:3};
  let respond=async form=>({requestId:form.get('requestId'),wakeVerified:true,success:true,nextState:{...current,power:false},label:'ปิดแอร์',feedback:{text:'ปิดแอร์ครับ',clips:['power-off']}});
  const audio={start:async()=>{},close:()=>events.push('close'),beep:async()=>events.push('beep'),reply:async f=>events.push(f.clips[0])};
  const c=new Controller({audio:()=>audio,wav,id:()=>`request-${++count}`,device:()=>destination,current:()=>current,revision:()=>revision,
   fetch:async(url,o)=>{if(url.endsWith('/voice-command'))return{ok:true,json:()=>respond(o.body)};return{ok:true,json:async()=>({sessionId:'test-session'})};},
-  send:next=>{sent.push(next);return{demo:true};},notice:(...v)=>events.push(v[0]),log:()=>{},render:()=>{}});
- return{c,audio,events,sent,setRespond:f=>respond=f,manual:()=>revision++,move:()=>destination='room-b'};
+  send:next=>{sent.push(next);return{demo:true};},notice:(...v)=>events.push(v[0]),log:(...v)=>logged.push(v),render:()=>{},...options});
+ return{c,audio,events,sent,logged,setRespond:f=>respond=f,manual:()=>revision++,move:()=>destination='room-b'};
 }
 const samples=()=>new Float32Array(32000).fill(.1);
 test('continuous activation waits for name; commands do not add greetings and duplicate callbacks deliver once',async()=>{
@@ -44,6 +44,26 @@ test('speech captured before the acknowledgement cannot inherit a wake token',as
 for(const action of ['stop','manual','move'])test(`late result cannot publish after ${action}`,async()=>{
  const h=fixture();await h.c.start(true);let release;h.setRespond(form=>new Promise(r=>release=()=>r({requestId:form.get('requestId'),wakeVerified:true,success:true,nextState:{power:false,temp:24,mode:0,fan:3}})));
  const pending=h.c.onEnd(samples(),h.c.epoch);await tick();if(action==='stop')h.c.stop();else h[action]();release();await pending;assert.equal(h.sent.length,0);h.c.stop();
+});
+test('voice waits for authenticated publishing; stop invalidates the async send and its feedback', async () => {
+ let authorize, guard, signals;
+ const h = fixture({ send: (_state, _label, options) => {
+  guard = options.validate; signals = options.signal;
+  return new Promise(resolve => { authorize = resolve; });
+ } });
+ try {
+  await h.c.start(true);
+  const output = h.c.onEnd(samples(), h.c.epoch); await tick();
+  assert.equal(h.c.state, 'PROCESSING_COMMAND');
+  assert.equal(guard(), true);
+  assert.ok(!h.events.includes('power-off'));
+  h.c.stop();
+  assert.equal(guard(), false);
+  assert.equal(signals.aborted, true);
+  authorize({ id: 'late' }); await output;
+  assert.equal(h.c.state, 'OFF'); assert.equal(h.c.commandId, null);
+  assert.ok(!h.events.includes('power-off'));
+ } finally { h.c.stop(); }
 });
 test('unsupported or rejected command is spoken without sending, microphone resumes',async()=>{
  const h=fixture();await h.c.start(true);h.setRespond(async f=>({requestId:f.get('requestId'),wakeVerified:true,success:false,message:'ไม่รองรับ',feedback:{text:'ไม่รองรับ',clips:['unsupported']}}));
@@ -112,4 +132,52 @@ test('failed acknowledgement cannot open an unnamed command window',async()=>{
  await h.c.onEnd(samples(),h.c.epoch);
  assert.equal(h.c.state,'WAIT_CONTINUOUS');assert.equal(h.c.wakeToken,null);assert.equal(h.sent.length,0);
  h.c.stop();
+});
+
+test('verified room question reports and speaks the latest reading without publishing even while a device command is pending',async()=>{
+ let current=26.5,release;
+ const queries=[];
+ const h=fixture({pending:()=>true,answer:query=>{queries.push(query);return{text:`อุณหภูมิห้อง ${current} องศาครับ`,clips:['room-temperature',`reading-${current}`]};}});
+ try {
+  await h.c.start(true);
+  h.setRespond(f=>new Promise(resolve=>{release=()=>resolve({requestId:f.get('requestId'),success:true,wakeVerified:true,query:'room_temperature'});}));
+  const spoken=[];h.audio.reply=async f=>spoken.push(f);
+  const question=h.c.onEnd(samples(),h.c.epoch);await tick();
+  current=28.5;h.manual();release();await question;
+  assert.deepEqual(queries,['room_temperature']);assert.equal(h.sent.length,0);
+  assert.deepEqual(spoken,[{text:'อุณหภูมิห้อง 28.5 องศาครับ',clips:['room-temperature','reading-28.5']}]);
+  assert.ok(h.events.includes(spoken[0].text));assert.deepEqual(h.logged,[['info',`เอ็นจี้ตอบ: ${spoken[0].text}`]]);
+  assert.equal(h.c.state,'WAIT_CONTINUOUS');
+ } finally {h.c.stop();}
+});
+
+test('unverified questions stay silent and an unknown query cannot fall through to publishing',async()=>{
+ let reads=0;
+ const h=fixture({answer:()=>{reads++;return{text:'คำตอบ',clips:['people-count']};}});
+ try {
+  await h.c.start(true);const baseline=h.events.length;
+  h.setRespond(async f=>({requestId:f.get('requestId'),success:true,query:'people_count'}));
+  await h.c.onEnd(samples(),h.c.epoch);
+  assert.equal(h.events.length,baseline);assert.equal(reads,0);
+  h.setRespond(async f=>({requestId:f.get('requestId'),success:true,wakeVerified:true,query:'not-a-query',nextState:{power:false,temp:24,mode:0,fan:3}}));
+  await h.c.onEnd(samples(),h.c.epoch);
+  assert.equal(h.sent.length,0);assert.equal(reads,0);assert.equal(h.c.state,'WAIT_CONTINUOUS');
+ } finally {h.c.stop();}
+});
+
+test('answered question uses one claimed wake window and a direct question finishes push to talk',async()=>{
+ const h=fixture({answer:query=>({text:`ตอบ ${query}`,clips:[query]})});
+ try {
+  await h.c.start(true);
+  h.setRespond(async f=>({requestId:f.get('requestId'),wakeVerified:true,wakeOnly:true,wakeToken:'query-token',feedback:{clips:['wake-ready']}}));
+  await h.c.onEnd(samples(),h.c.epoch);
+  assert.equal(h.c.state,'WAIT_COMMAND');
+  h.setRespond(async f=>{assert.equal(f.get('stage'),'command');assert.equal(f.get('wakeToken'),'query-token');return{requestId:f.get('requestId'),success:true,query:'ac_power'};});
+  await h.c.onEnd(samples(),h.c.epoch);
+  assert.ok(h.events.includes('ac_power'));assert.equal(h.c.wakeToken,null);assert.equal(h.c.state,'WAIT_CONTINUOUS');
+  await h.c.start(false);
+  h.setRespond(async f=>{assert.equal(f.get('stage'),'direct');return{requestId:f.get('requestId'),success:true,query:'ac_setpoint'};});
+  await h.c.onEnd(samples(),h.c.epoch);
+  assert.ok(h.events.includes('ac_setpoint'));assert.equal(h.c.state,'OFF');assert.equal(h.sent.length,0);
+ } finally {h.c.stop();}
 });

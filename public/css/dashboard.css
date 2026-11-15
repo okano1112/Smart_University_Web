@@ -153,6 +153,10 @@ p+p {
 .header-tools p {
   font-size:13px
 }
+.logout-form {
+  margin:0;
+  flex-shrink:0
+}
 .page-heading {
   padding:30px 0 24px
 }
@@ -1112,6 +1116,12 @@ p+p {
     padding:8px 10px;
     font-size:13px
   }
+  .header-tools {
+    gap:10px
+  }
+  .logout-form .text-button {
+    font-size:13px
+  }
   .header-tools svg {
     width:17px;
     height:17px
@@ -1364,6 +1374,10 @@ p+p {
     transition:none!important;
     animation:none!important
   }
+}
+
+@media(max-width:370px) {
+  .masthead .wordmark > span { display:none; }
 }
 
 .room-reading dd.reading-caption {

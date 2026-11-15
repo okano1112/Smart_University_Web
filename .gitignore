@@ -3,6 +3,8 @@
 node-red/runtime/
 data/ac-schedules.json
 data/ac-schedules.json.*.tmp
+data/login-account.json
+data/login-account.json.*.tmp
 __pycache__/
 
 models/whisper-small/

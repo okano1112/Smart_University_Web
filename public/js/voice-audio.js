@@ -141,8 +141,8 @@
                 this.kind = 'rms';
             }
             this.ready = true;
-            // Small, bundled clips are fetched in the background, never another AI request.
-            for (const key of Object.keys(root.SmartVoiceFeedback?.phrases || {})) this.loadClip(key).catch(() => {});
+            // Preload familiar command replies; question pieces are fetched as needed.
+            for (const key of root.SmartVoiceFeedback?.preloadKeys || []) this.loadClip(key).catch(() => {});
         }
         speechStart() {
             if (this.closed || this.inputSuppressed || this.inputMuted) return;

@@ -30,7 +30,13 @@
   <div class="app-shell">
     <header class="masthead">
       <a class="wordmark" href="/" aria-label="BimClub หน้าหลัก"><strong>BimClub</strong><span>/</span><span>ROOM CONTROL</span></a>
-      <div class="header-tools"><p id="ui-datetime" class="text-muted"></p><button id="btn-settings" class="btn btn-secondary btn-small" type="button" onclick="toggleSettings()" aria-controls="settings-panel" aria-expanded="false"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 3h6l1 3 3 1 2 5-2 5-3 1-1 3H9l-1-3-3-1-2-5 2-5 3-1z"/><circle cx="12" cy="12" r="3"/></svg>ตั้งค่า</button></div>
+      <div class="header-tools">
+        <p id="ui-datetime" class="text-muted"></p>
+        <button id="btn-settings" class="btn btn-secondary btn-small" type="button" onclick="toggleSettings()" aria-controls="settings-panel" aria-expanded="false"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 3h6l1 3 3 1 2 5-2 5-3 1-1 3H9l-1-3-3-1-2-5 2-5 3-1z"/><circle cx="12" cy="12" r="3"/></svg>ตั้งค่า</button>
+        <form class="logout-form" method="post" action="/logout">
+          <button id="btn-logout" class="text-button" type="submit">ออกจากระบบ</button>
+        </form>
+      </div>
     </header>
     <main>
       <div class="page-heading"><h1 id="ui-room-name">ห้องประชุม BimClub</h1><span class="heading-rule" aria-hidden="true"></span></div>
@@ -75,7 +81,7 @@
             <div class="room-reading"><dt><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3S5 11 5 15a7 7 0 0 0 14 0c0-4-7-12-7-12Z"/></svg>ความชื้น</dt><dd><span id="val-room-humid">—</span><span class="reading-unit">%</span></dd><dd id="desc-room-humid" class="reading-caption">รอข้อมูลเซนเซอร์</dd></div>
             <div class="room-reading"><dt><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="9" cy="7" r="3"/><path d="M3 21v-4a6 6 0 0 1 12 0v4H3ZM17 4a3 3 0 0 1 0 6M18 14a5 5 0 0 1 3 5v2h-3"/></svg>จำนวนคน</dt><dd><span id="val-room-people">—</span><span class="reading-unit">คน</span></dd><dd id="desc-room-people" class="reading-caption">รอข้อมูล CiRA CORE</dd></div>
           </dl></section>
-          <section class="voice-panel" aria-labelledby="voice-title"><div class="section-heading"><h2 id="voice-title">Engi <span>(เอ็นจี้)</span></h2><span class="local-label">ประมวลผลในเครื่อง</span></div><p class="text-muted">เรียก “เอ็นจี้” แล้วพูดคำสั่ง</p><p class="voice-example">“เอ็นจี้ เปิดแอร์ให้ผมหน่อย”</p><button id="btn-wake-toggle" type="button" class="wake-toggle" onclick="toggleAlwaysOnWakeMode()" aria-pressed="false"><span id="wake-btn-text">เปิดรับคำเรียก Engi</span><span class="switch-track" aria-hidden="true"><i id="wake-dot"></i></span></button><p id="engi-status" class="voice-help text-muted" role="status">ปิดการรอเรียก Engi</p><button id="btn-voice-cmd" type="button" class="btn btn-primary voice-button" onclick="handleVoiceButtonClick()"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/></svg><i id="voice-dot" class="status-dot" aria-hidden="true"></i><span id="voice-btn-text">กดเพื่อพูดกับเอ็นจี้</span></button><p class="voice-help text-muted">พูด “เอ็นจี้” หรือ “สวัสดีเอ็นจี้” แล้วรอเสียงขานรับ หรือพูดชื่อพร้อมคำสั่งได้เลย</p></section>
+          <section class="voice-panel" aria-labelledby="voice-title"><div class="section-heading"><h2 id="voice-title">Engi <span>(เอ็นจี้)</span></h2><span class="local-label">ประมวลผลในเครื่อง</span></div><p class="text-muted">เรียก “เอ็นจี้” เพื่อถามข้อมูลห้องหรือสั่งแอร์</p><p class="voice-example">“เอ็นจี้ ตอนนี้กี่องศา” · “เอ็นจี้ ในห้องมีกี่คน”</p><button id="btn-wake-toggle" type="button" class="wake-toggle" onclick="toggleAlwaysOnWakeMode()" aria-pressed="false"><span id="wake-btn-text">เปิดรับคำเรียก Engi</span><span class="switch-track" aria-hidden="true"><i id="wake-dot"></i></span></button><p id="engi-status" class="voice-help text-muted" role="status">ปิดการรอเรียก Engi</p><button id="btn-voice-cmd" type="button" class="btn btn-primary voice-button" onclick="handleVoiceButtonClick()"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/></svg><i id="voice-dot" class="status-dot" aria-hidden="true"></i><span id="voice-btn-text">กดเพื่อพูดกับเอ็นจี้</span></button><p class="voice-help text-muted">พูด “เอ็นจี้” หรือ “สวัสดีเอ็นจี้” แล้วรอเสียงขานรับ หรือพูดชื่อพร้อมคำสั่งได้เลย</p></section>
         </aside>
       </div>
       <div class="panel cira-activity-panel" id="cira-activity-panel">

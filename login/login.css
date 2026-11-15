@@ -1,0 +1,76 @@
+:root {
+  --canvas:#f7f7f5;
+  --surface:#fff;
+  --ink:#171717;
+  --muted:#62625c;
+  --border:#dfdfd9;
+  --input-border:#8d8d83;
+  --brand:#a3131a;
+  --brand-dark:#711015;
+  --brand-soft:#fbefef;
+  color-scheme:light;
+}
+* { box-sizing:border-box; }
+body {
+  margin:0;
+  background:var(--canvas);
+  color:var(--ink);
+  font:400 1rem/1.65 'Prompt', system-ui, sans-serif;
+}
+p,h1 { margin:0; }
+.login-masthead {
+  width:min(calc(100% - 2rem), 74rem);
+  min-height:4.5rem;
+  margin-inline:auto;
+  display:flex;
+  align-items:center;
+  border-bottom:1px solid var(--border);
+}
+.login-wordmark { display:flex; align-items:baseline; flex-wrap:wrap; gap:0 0.65rem; font-size:.875rem; }
+.login-wordmark strong { font-size:1.45rem; letter-spacing:-.025em; }
+.login-wordmark span { color:var(--muted); }
+.login-main { display:grid; justify-items:center; padding:clamp(1.75rem,7vh,4.5rem) 1rem 2rem; }
+.login-panel {
+  width:min(100%,27rem);
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:12px;
+  padding:clamp(1.25rem,4vw,2rem);
+  overflow-wrap:anywhere;
+}
+.login-panel h1 { font-size:clamp(1.75rem,4vw,2rem); line-height:1.4; letter-spacing:-.02em; }
+.login-description { color:var(--muted); margin-top:.35rem; }
+.login-message:not(:empty) {
+  margin-top:1.25rem;
+  padding:.7rem .85rem;
+  border:1px solid #dfb9ba;
+  border-radius:8px;
+  color:var(--brand-dark);
+  background:var(--brand-soft);
+}
+.login-panel form { display:grid; margin-top:1.45rem; }
+.login-panel label { font-weight:600; }
+.login-panel input,.login-panel button {
+  width:100%;
+  min-width:0;
+  min-height:48px;
+  border-radius:8px;
+  font:inherit;
+  padding:.55rem .75rem;
+}
+.login-panel input {
+  border:1px solid var(--input-border);
+  color:var(--ink);
+  background:var(--surface);
+  margin:.3rem 0 1rem;
+}
+.login-panel button {
+  margin-top:.25rem;
+  border:1px solid transparent;
+  background:var(--brand);
+  color:#fff;
+  font-weight:600;
+  cursor:pointer;
+}
+.login-panel button:hover,.login-panel button:active { background:var(--brand-dark); }
+.login-panel :focus-visible { outline:3px solid var(--brand); outline-offset:3px; }

@@ -2,16 +2,30 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { once } = require('node:events');
+const { mkdtempSync } = require('node:fs');
+const { writeFile, rm } = require('node:fs/promises');
+const { tmpdir } = require('node:os');
+const path = require('node:path');
 const { wav } = require('../public/js/voice-audio');
+const { makeLoginAccount } = require('../room-login');
+const loginDirectory = mkdtempSync(path.join(tmpdir(), 'bimclub-voice-login-'));
+process.env.BIMCLUB_LOGIN_ACCOUNT_FILE = path.join(loginDirectory, 'account.json');
 const { app, voiceSessions, localVoice } = require('../server');
 const { commandFor } = require('../offline-voice');
 
 test('offline API: local inference, no external fetch, deduplication and rejection', async t => {
   const server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
-  const fetchHttp = global.fetch, classify = localVoice.classify, start = localVoice.start;
+  const testFetch = global.fetch, classify = localVoice.classify, start = localVoice.start;
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const password = 'voice-integration-test-only';
+  await writeFile(process.env.BIMCLUB_LOGIN_ACCOUNT_FILE, JSON.stringify(await makeLoginAccount('voice-test', password)));
+  const login = await testFetch(base + '/login', { method: 'POST', headers: { Origin: base },
+    body: new URLSearchParams({ username: 'voice-test', password }), redirect: 'manual' });
+  assert.equal(login.status, 303);
+  const cookie = login.headers.get('set-cookie').split(';')[0];
+  const fetchHttp = (url, options = {}) => testFetch(url, { ...options, headers: { ...options.headers, Origin: base, Cookie: cookie } });
   localVoice.start = async () => {};
   global.fetch = () => { throw new Error('External fetch forbidden'); };
-  const base = `http://127.0.0.1:${server.address().port}`;
   let calls = 0, inferenceOptions, prediction = { accepted: true, label: '00_POWER_ON', confidence: 0.99, margin: 0.98 };
   localVoice.classify = async (_audio, _signal, options) => { calls++; inferenceOptions = options; return prediction; };
   const wakePrediction = transcript => ({ accepted:true, engine:'LOCAL_WHISPER', transcript,
@@ -22,9 +36,10 @@ test('offline API: local inference, no external fetch, deduplication and rejecti
     return { status: r.status, ...await r.json() };
   };
   const audio = await wav(new Float32Array(16000).fill(0.1));
-  const command = async (sessionId, stage = 'direct', id = `request-${String(++sequence).padStart(16, '0')}`, current = { power: false, temp: 24, mode: 2, fan: 2 }) => {
+  const command = async (sessionId, stage = 'direct', id = `request-${String(++sequence).padStart(16, '0')}`, current = { power: false, temp: 24, mode: 2, fan: 2 }, wakeToken) => {
     const form = new FormData();
     for (const [k, v] of Object.entries({ sessionId, device: 'room-a', stage, requestId: id, currentAc: JSON.stringify(current) })) form.append(k, v);
+    if (wakeToken) form.append('wakeToken', wakeToken);
     form.append('audio', audio, 'voice.wav');
     const r = await fetchHttp(base + '/api/voice-command', { method: 'POST', body: form });
     return { status: r.status, ...await r.json() };
@@ -108,6 +123,25 @@ test('offline API: local inference, no external fetch, deduplication and rejecti
       assert.equal((await json('/api/voice-session/claim',body)).status,409);
       assert.equal((await command(session.sessionId,'continuous')).ignored,true);
     });
+    await t.test('room questions return only an intent after the same wake and one-use ticket checks', async () => {
+      const noControl = (response, query) => {
+        assert.equal(response.status, 200); assert.equal(response.success, true); assert.equal(response.query, query);
+        for (const key of ['nextState', 'feedback', 'wakeToken', 'followUp']) assert.equal(response[key], undefined, key);
+      };
+      prediction = wakePrediction('ตอนนี้อุณหภูมิเท่าไหร่');
+      assert.equal((await command(session.sessionId, 'continuous')).ignored, true);
+      noControl(await command(session.sessionId), 'room_temperature');
+      prediction = wakePrediction('เอ็นจี้ในห้องมีกี่คน');
+      const named = await command(session.sessionId, 'continuous');
+      noControl(named, 'people_count'); assert.equal(named.wakeVerified, true);
+      prediction = wakePrediction('เอ็นจี้');
+      const wake = await command(session.sessionId, 'continuous');
+      const ticket = { sessionId: session.sessionId, device: 'room-a', wakeToken: wake.wakeToken };
+      await json('/api/voice-session/arm', ticket); await json('/api/voice-session/claim', ticket);
+      prediction = wakePrediction('แอร์เปิดอยู่ไหม');
+      noControl(await command(session.sessionId, 'command', undefined, undefined, wake.wakeToken), 'ac_power');
+      assert.equal((await command(session.sessionId, 'command', undefined, undefined, wake.wakeToken)).status, 409);
+    });
     await t.test('verified named follow-up and errors carry proof; direct prompts cannot mint a wake token', async () => {
       prediction=wakePrediction('เอ็นจี้ปรับอุณหภูมิ');
       const followUp=await command(session.sessionId,'continuous');
@@ -136,9 +170,10 @@ test('offline API: local inference, no external fetch, deduplication and rejecti
       assert.equal((await command(session.sessionId)).status, 410);
     });
   } finally {
-    global.fetch = fetchHttp; localVoice.classify = classify; localVoice.start = start;
+    global.fetch = testFetch; localVoice.classify = classify; localVoice.start = start;
     for (const id of voiceSessions.sessions.keys()) voiceSessions.cancel(id);
     server.closeAllConnections(); await new Promise(r => server.close(r));
+    await rm(loginDirectory, { recursive: true, force: true });
   }
 });
 

@@ -40,6 +40,7 @@ class LocalASR(unittest.TestCase):
             'wake-english-vad-offset': 'wake', 'wake-english-inline': ['ON'],
             'wake-not-andy': None, 'wake-not-similar-inline': None, 'wake-not-engine': None,
             'wake-not-unnamed-en': None, 'wake-not-andy-inline': None, 'wake-not-angie': None,
+            'status-room-temp': 'room_temperature', 'status-room-people': 'people_count', 'status-unnamed': None,
         }
         results = {}
         for name in expected:
@@ -60,7 +61,7 @@ class LocalASR(unittest.TestCase):
             const entries=Object.entries(JSON.parse(fs.readFileSync(0,'utf8')));
             process.stdout.write(JSON.stringify(Object.fromEntries(entries.map(([name,result])=>{
               const text=verifiedWakeTranscript(result), intent=text&&parseSpeech(text);
-              return [name,intent?.wakeOnly?'wake':intent?.commands||null];
+              return [name,intent?.wakeOnly?'wake':intent?.query||intent?.commands||null];
             }))));
         '''], cwd=ROOT, input=json.dumps(results).encode()))
         for name, actual in mapped.items():

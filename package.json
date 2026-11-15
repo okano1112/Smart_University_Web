@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node server.js",
+    "auth:setup": "node scripts/setup-login.js",
     "node-red:build": "node node-red/build-flow.js",
     "node-red:start": "node scripts/start-cira-node-red.js",
     "test": "node --test test/*.test.js"

@@ -1,5 +1,6 @@
 (function (root) {
     'use strict';
+    const QUERIES = new Set(['room_temperature', 'people_count', 'room_humidity', 'ac_setpoint', 'ac_power']);
     class VoiceController {
         constructor(options) {
             this.options = options;
@@ -40,6 +41,7 @@
             if (session) this.cancelSession(session);
         }
         async start(handsFree, { automatic = false } = {}) {
+            if (this.options.canStart?.() === false) return false;
             this.lastStartError = null; this.stop();
             const epoch = this.epoch;
             this.device = this.options.device(); this.handsFree = handsFree; this.failures = 0; this.setState('INIT');
@@ -219,12 +221,30 @@
                     await this.say(data.feedback || { text: 'ไม่เข้าใจคำสั่งครับ กรุณาพูดใหม่', clips: ['not-understood'] }, epoch);
                     this.rest(epoch); return;
                 }
+                if (Object.hasOwn(data, 'query')) {
+                    // Read observations when the answer is ready, independent of
+                    // AC revisions since capture. A query cannot fall through to send().
+                    this.clearWake();
+                    const feedback = QUERIES.has(data.query) ? this.options.answer?.(data.query) : null;
+                    if (typeof feedback?.text !== 'string' || !feedback.text.trim() || !Array.isArray(feedback.clips) || !feedback.clips.length) {
+                        this.options.notice('ยังอ่านคำตอบไม่ได้ กรุณาถามใหม่', 'warning', 5000);
+                    } else {
+                        this.options.notice(feedback.text, 'info', 6500);
+                        this.options.log('info', `เอ็นจี้ตอบ: ${feedback.text}`);
+                        await this.say(feedback, epoch);
+                    }
+                    if (inputVersion === this.inputVersion) this.rest(epoch);
+                    return;
+                }
                 if (JSON.stringify(this.options.current()) !== desired || this.options.revision?.() !== revision) {
                     this.options.notice('มีคำสั่งอื่นระหว่างประมวลผล กรุณาพูดใหม่', 'warning', 5000); this.rest(epoch); return;
                 }
                 this.clearWake();
                 const beforeRevision = this.options.revision?.();
-                const sent = this.options.send(data.nextState, `${data.label} [โมเดลในเครื่อง]`);
+                const validate = () => this.active(epoch) && inputVersion === this.inputVersion && !controller.signal.aborted &&
+                    JSON.stringify(this.options.current()) === desired && this.options.revision?.() === revision;
+                const sent = await this.options.send(data.nextState, `${data.label} [โมเดลในเครื่อง]`, { validate, signal: controller.signal });
+                if (!this.active(epoch) || inputVersion !== this.inputVersion) return;
                 if (!sent) { await this.say({ text: 'ยังส่งคำสั่งไม่ได้ครับ กรุณาตรวจสอบการเชื่อมต่อ', clips: ['not-sent'] }, epoch); this.rest(epoch); return; }
                 for (const packet of this.queue) if (packet.revision === beforeRevision) packet.revision = this.options.revision?.();
                 let feedback = data.feedback || this.options.feedback?.(data.nextState, previous);

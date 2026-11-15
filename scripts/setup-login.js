@@ -5,7 +5,7 @@ const { access, mkdir, rename, rm, writeFile } = require('node:fs/promises');
 const path = require('node:path');
 const { createInterface } = require('node:readline/promises');
 const { Writable } = require('node:stream');
-const { ACCOUNT_FILE, makeLoginAccount } = require('../room-login');
+const { ACCOUNT_FILE, MIN_PASSWORD_LENGTH, makeLoginAccount } = require('../room-login');
 
 async function setup() {
     const args = process.argv.slice(2);
@@ -42,7 +42,7 @@ async function setup() {
     let account;
     try {
         const username = (await ask('ชื่อผู้ใช้ [admin]: ')).trim() || 'admin';
-        const password = await secret('รหัสผ่านใหม่ (อย่างน้อย 12 ตัว): ');
+        const password = await secret(`รหัสผ่านใหม่ (อย่างน้อย ${MIN_PASSWORD_LENGTH} ตัว): `);
         if (password !== await secret('พิมพ์รหัสผ่านอีกครั้ง: ')) throw new Error('รหัสผ่านทั้งสองครั้งไม่ตรงกัน');
         account = await makeLoginAccount(username, password);
     } finally { reader.close(); }

@@ -13,6 +13,7 @@ const SESSION_MS = 12 * 60 * 60 * 1000;
 const RATE_MS = 5 * 60 * 1000;
 const SESSION_LIMIT = 128;
 const MAX_FAILED = 10;
+const MIN_PASSWORD_LENGTH = 8;
 const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
 const LOCAL_PEERS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 
@@ -29,8 +30,8 @@ function passwordHash(password, salt) {
 }
 
 async function makeLoginAccount(username, password) {
-    if (!validUsername(username) || !validPassword(password) || [...password].length < 12) {
-        throw new Error('ชื่อผู้ใช้ต้องเป็นอักษรอังกฤษ ตัวเลข จุด ขีด หรือขีดล่าง และรหัสผ่านต้องยาว 12 ตัวขึ้นไป');
+    if (!validUsername(username) || !validPassword(password) || [...password].length < MIN_PASSWORD_LENGTH) {
+        throw new Error(`ชื่อผู้ใช้ต้องเป็นอักษรอังกฤษ ตัวเลข จุด ขีด หรือขีดล่าง และรหัสผ่านต้องยาว ${MIN_PASSWORD_LENGTH} ตัวขึ้นไป`);
     }
     const salt = randomBytes(16);
     const hash = await passwordHash(password, salt);
@@ -188,4 +189,4 @@ function installRoomLogin(app, { accountFile = ACCOUNT_FILE, now = Date.now } = 
     });
 }
 
-module.exports = { ACCOUNT_FILE, makeLoginAccount, installRoomLogin };
+module.exports = { ACCOUNT_FILE, MIN_PASSWORD_LENGTH, makeLoginAccount, installRoomLogin };

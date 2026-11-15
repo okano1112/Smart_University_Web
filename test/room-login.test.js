@@ -22,7 +22,7 @@ test('login closes application routes and checks credentials, origin, expiry and
     const servers = [http, timed];
     await Promise.all(servers.map(server => once(server, 'listening')));
     const base = 'http://127.0.0.1:' + http.address().port, timedBase = 'http://127.0.0.1:' + timed.address().port;
-    const username = 'integration-user', password = 'example-only-test-fixture-password';
+    const username = 'integration-user', password = 'qa-8xQ!7';
     const request = (route, options, host = base) => fetch(host + route, { ...options, redirect: 'manual' });
     const signin = (params, options = {}, host = base) => request('/login', {
         method: 'POST', body: new URLSearchParams(params), ...options, headers: { Origin: host, ...options.headers }
@@ -44,6 +44,7 @@ test('login closes application routes and checks credentials, origin, expiry and
             assert.equal((await request(target, { method })).status, 401, target);
         }
 
+        await assert.rejects(makeLoginAccount(username, password.slice(0, -1)), /8 ตัวขึ้นไป/);
         const account = await makeLoginAccount(username, password);
         assert.equal(Object.hasOwn(account, 'password'), false);
         assert.notEqual(account.hash, password);

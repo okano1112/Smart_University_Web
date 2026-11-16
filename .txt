@@ -1,3 +1,1 @@
-https://desktop-pro8m59.tailbc6625.ts.net/login
-npx.cmd --yes wrangler@4 login
-npx.cmd --yes wrangler@4 deploy --config .\cloudflare\wrangler.jsonc
+https://bimclub.workers.dev

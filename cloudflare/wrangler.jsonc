@@ -7,7 +7,7 @@
   "vpc_services": [
     {
       "binding": "BIMCLUB_ORIGIN",
-      "service_id": "REPLACE_WITH_VPC_SERVICE_ID"
+      "service_id": "01a1e308-4541-7881-8071-32606fe23584"
     }
   ]
 }

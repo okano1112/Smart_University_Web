@@ -35,7 +35,8 @@ test('login closes application routes and checks credentials, origin, expiry and
         assert.equal((await request('/login.css')).status, 200);
         assert.equal((await request('/api/auth/session')).status, 401);
         for (const target of ['/api/schedules', '/api/cira/logs', '/js/dashboard.js', '/audio/voice/wake-ready.wav',
-            '/vendor/mqtt.min.js', '/vad-web/silero_vad.onnx', '/ort/ort.min.js', '/data/login-account.json']) {
+            '/vendor/mqtt.min.js', '/vad-web/silero_vad.onnx', '/ort/ort.min.js', '/ort/ort.wasm.min.js',
+            '/ort/ort-wasm-simd-threaded.wasm', '/data/login-account.json']) {
             assert.equal((await request(target)).status, 401, target);
         }
         for (const [method, target] of [['POST', '/api/voice-command'], ['POST', '/api/voice-session'],
@@ -69,7 +70,37 @@ test('login closes application routes and checks credentials, origin, expiry and
         assert.match(dashboard.headers.get('cache-control'), /no-store/);
         assert.equal((await request('/js/dashboard.js', { headers: cookie })).status, 200);
         assert.equal((await request('/data/login-account.json', { headers: cookie })).status, 404);
-        assert.equal((await request('/api/auth/session', { headers: cookie })).status, 204);
+        const session = await request('/api/auth/session', { headers: cookie });
+        assert.equal(session.status, 204);
+        assert.match(session.headers.get('cache-control'), /no-store/);
+        const wasmPath = '/ort/ort-wasm-simd-threaded.wasm';
+        const asset = await request(wasmPath, { headers: { ...cookie, 'Accept-Encoding': 'gzip' } });
+        assert.equal(asset.status, 200);
+        assert.equal(asset.headers.get('content-type'), 'application/wasm');
+        assert.equal(asset.headers.get('content-encoding'), 'gzip');
+        assert.equal(asset.headers.get('cache-control'), 'private, no-cache');
+        assert.equal(asset.headers.get('cloudflare-cdn-cache-control'), 'no-store');
+        assert.match(asset.headers.get('vary'), /Accept-Encoding/i);
+        const wasm = Buffer.from(await asset.arrayBuffer());
+        assert.equal(wasm.subarray(0, 4).toString('ascii'), '\0asm');
+        assert.ok(Number(asset.headers.get('content-length')) < wasm.length / 2);
+        const ranged = await request(wasmPath, { headers: { ...cookie, Range: 'bytes=0-3', 'Accept-Encoding': 'gzip' } });
+        assert.equal(ranged.status, 206);
+        assert.equal(ranged.headers.get('content-encoding'), null);
+        assert.equal(ranged.headers.get('content-range'), `bytes 0-3/${wasm.length}`);
+        assert.equal(Buffer.from(await ranged.arrayBuffer()).toString('ascii'), '\0asm');
+        const assetEtag = asset.headers.get('etag');
+        assert.ok(assetEtag);
+        const revalidated = await new Promise((resolve, reject) => {
+            const req = requestHttp(base + wasmPath, { method: 'HEAD', headers: {
+                ...cookie, 'Accept-Encoding': 'gzip', 'If-None-Match': assetEtag
+            } }, res => { res.resume(); resolve(res); });
+            req.once('error', reject);
+            req.end();
+        });
+        assert.equal(revalidated.statusCode, 304);
+        assert.equal(revalidated.headers['cache-control'], 'private, no-cache');
+        assert.equal(revalidated.headers['cloudflare-cdn-cache-control'], 'no-store');
         assert.equal((await request('/api/schedules', { method: 'POST', headers: cookie })).status, 403);
         const blocked = await request('/api/schedules', { method: 'POST', headers: { ...cookie, Origin: 'https://untrusted.example' } });
         assert.equal(blocked.status, 403);
@@ -93,6 +124,7 @@ test('login closes application routes and checks credentials, origin, expiry and
         assert.equal(logOut.headers.get('location'), '/login');
         assert.match(logOut.headers.get('set-cookie'), /^bimclub_session=;/);
         assert.equal((await request('/api/auth/session', { headers: cookie })).status, 401);
+        assert.equal((await request(wasmPath, { headers: { ...cookie, 'If-None-Match': assetEtag } })).status, 401);
 
         const timedLogin = await signin({ username, password }, {}, timedBase);
         assert.equal(timedLogin.status, 303);

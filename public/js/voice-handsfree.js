@@ -66,9 +66,9 @@
             return started;
         }
         stopByUser() { this.setEnabled(false); this.controller.stop(); }
-        waitForGesture() {
+        waitForGesture(label = 'แตะหน้าจอเพื่อเริ่มฟัง') {
             this.awaitingGesture = true;
-            this.controller.setState('OFF', 'แตะหน้าจอเพื่อเริ่มฟัง');
+            this.controller.setState('OFF', label);
         }
         async readPermission() {
             try {
@@ -114,6 +114,7 @@
                 return;
             }
             if (error.code === 'VOICE_GESTURE_REQUIRED') { this.waitForGesture(); return; }
+            if (error.code === 'VOICE_MIC_PERMISSION_TIMEOUT') { this.waitForGesture(error.message); return; }
             if (Date.now() - (this.lastStartedAt || Date.now()) > 30000) this.failures = 0;
             this.lastStartedAt = 0;
             const delay = Math.min(30, 2 ** Math.min(this.failures++, 5));

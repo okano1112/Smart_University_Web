@@ -2,6 +2,9 @@ require('dotenv').config();
 const express = require('express');
 const multer = require('multer');
 const path = require('path');
+const { readFile } = require('node:fs/promises');
+const { promisify } = require('node:util');
+const gzip = promisify(require('node:zlib').gzip);
 const { installRoomLogin } = require('./room-login');
 const { VoiceSessions, VoiceError, validAc } = require('./voice-session');
 const voiceSessions = new VoiceSessions();
@@ -33,9 +36,34 @@ app.post('/api/comfort/recommendation', createComfortHandler());
 // Serve the same installed MQTT.js bundle to browsers without a third-party CDN.
 app.get('/vendor/mqtt.min.js', (req, res) => res.sendFile(path.join(path.dirname(require.resolve('mqtt/package.json')), 'dist', 'mqtt.min.js')));
 
-// เสิร์ฟไฟล์โมเดล Silero VAD และ ONNX Runtime จากเครื่องตัวเอง
-app.use('/vad-web', express.static(path.join(__dirname, 'node_modules/@ricky0123/vad-web/dist')));
-app.use('/ort', express.static(path.join(__dirname, 'node_modules/onnxruntime-web/dist')));
+const vadDirectory = 'node_modules/@ricky0123/vad-web/dist';
+const ortDirectory = 'node_modules/onnxruntime-web/dist';
+function serveVoiceAsset(url, file, mime, compress = false) {
+  const source = path.join(__dirname, file);
+  let compressed;
+  // The login middleware must run before the browser can revalidate these files.
+  app.get(url, async (req, res) => {
+    res.type(mime).set({ 'Cache-Control': 'private, no-cache', 'Cloudflare-CDN-Cache-Control': 'no-store' });
+    if (compress) res.vary('Accept-Encoding');
+    if (!compress || req.get('Range') || req.acceptsEncodings('gzip', 'identity') !== 'gzip') {
+      return res.sendFile(source, { cacheControl: false });
+    }
+    if (!compressed) {
+      compressed = readFile(source).then(data => gzip(data)).catch(error => { compressed = null; throw error; });
+    }
+    const body = await compressed;
+    return res.set('Content-Encoding', 'gzip').send(body);
+  });
+}
+serveVoiceAsset('/ort/ort.wasm.min.js', `${ortDirectory}/ort.wasm.min.js`, 'text/javascript');
+serveVoiceAsset('/ort/ort-wasm-simd-threaded.mjs', `${ortDirectory}/ort-wasm-simd-threaded.mjs`, 'text/javascript');
+serveVoiceAsset('/ort/ort-wasm-simd-threaded.wasm', `${ortDirectory}/ort-wasm-simd-threaded.wasm`, 'application/wasm', true);
+serveVoiceAsset('/vad-web/bundle.min.js', `${vadDirectory}/bundle.min.js`, 'text/javascript');
+serveVoiceAsset('/vad-web/vad.worklet.bundle.min.js', `${vadDirectory}/vad.worklet.bundle.min.js`, 'text/javascript');
+serveVoiceAsset('/vad-web/silero_vad.onnx', `${vadDirectory}/silero_vad.onnx`, 'application/octet-stream', true);
+serveVoiceAsset('/js/voice-audio-worklet.js', 'public/js/voice-audio-worklet.js', 'text/javascript');
+app.use('/vad-web', express.static(path.join(__dirname, vadDirectory)));
+app.use('/ort', express.static(path.join(__dirname, ortDirectory)));
 app.use(express.static(path.join(__dirname, 'public')));
 
 const upload = multer({

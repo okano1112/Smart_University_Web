@@ -155,7 +155,8 @@ const assets = [
     '@ricky0123/vad-web/dist/bundle.min.js',
     '@ricky0123/vad-web/dist/vad.worklet.bundle.min.js',
     '@ricky0123/vad-web/dist/silero_vad.onnx',
-    'onnxruntime-web/dist/ort.js',
+    'onnxruntime-web/dist/ort.wasm.min.js',
+    'onnxruntime-web/dist/ort-wasm-simd-threaded.mjs',
     'onnxruntime-web/dist/ort-wasm-simd-threaded.wasm'
 ];
 process.exit(matching && assets.every(name => fs.statSync('node_modules/' + name).size > 0) ? 0 : 1);

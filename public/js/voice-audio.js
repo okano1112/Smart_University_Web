@@ -1,5 +1,17 @@
 (function (root) {
     'use strict';
+    const SILERO_START_TIMEOUT_MS = 9000;
+    async function waitForAudioStep(operation, signal, timeout, error) {
+        let timer, abort;
+        const deadline = new Promise((_, reject) => {
+            abort = () => reject(signal.reason);
+            signal.addEventListener('abort', abort, { once: true });
+            if (signal.aborted) abort();
+            else timer = setTimeout(() => reject(error), timeout);
+        });
+        try { return await Promise.race([operation, deadline]); }
+        finally { clearTimeout(timer); signal.removeEventListener('abort', abort); }
+    }
     function merge(chunks) {
         const result = new Float32Array(chunks.reduce((size, chunk) => size + chunk.length, 0));
         let offset = 0;
@@ -45,25 +57,27 @@
             if (!Context || !navigator.mediaDevices?.getUserMedia) throw new Error('กรุณาใช้ HTTPS หรือ localhost และอนุญาตไมโครโฟน');
             // Called synchronously from the user's click, before the first await.
             this.context = new Context();
-            const resumed = this.context.resume();
-            if (automatic) {
-                let gestureTimer;
-                try {
-                    await Promise.race([resumed, new Promise((_, reject) => {
-                        gestureTimer = setTimeout(() => reject(Object.assign(new Error('แตะหน้าจอครั้งเดียวเพื่อเริ่มฟังคำสั่ง'), { code: 'VOICE_GESTURE_REQUIRED' })), 500);
-                    })]);
-                } finally { clearTimeout(gestureTimer); }
-            } else await resumed;
+            const signal = this.assetController.signal;
+            const activationError = automatic
+                ? Object.assign(new Error('แตะหน้าจอครั้งเดียวเพื่อเริ่มฟังคำสั่ง'), { code: 'VOICE_GESTURE_REQUIRED' })
+                : new Error('ระบบเสียงยังไม่พร้อม กรุณากดเปิดไมค์ใหม่');
+            await waitForAudioStep(this.context.resume(), signal, automatic ? 500 : 5000, activationError);
             if (this.closed) return;
             if (this.context.state !== 'running') throw new Error('ระบบเสียงยังไม่พร้อม กรุณากดเปิดไมค์ใหม่');
             this.context.onstatechange = () => {
                 if (!this.closed && this.ready && this.context.state !== 'running') this.callbacks.onError(new Error('ระบบเสียงถูกพักโดยเบราว์เซอร์'));
             };
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: {
+            this.callbacks.onPreparation?.('รออนุญาตไมโครโฟนในเบราว์เซอร์');
+            const microphone = navigator.mediaDevices.getUserMedia({ audio: {
                 echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1
-            } });
-            if (this.closed) { stream.getTracks().forEach(track => track.stop()); return; }
-            this.stream = stream;
+            } }).then(stream => {
+                if (this.closed) stream.getTracks().forEach(track => track.stop());
+                else this.stream = stream;
+                return stream;
+            });
+            const permissionTimeout = Object.assign(new Error('กรุณาอนุญาตไมโครโฟนในเบราว์เซอร์ แล้วแตะหน้าจอเพื่อเริ่มฟัง'), { code: 'VOICE_MIC_PERMISSION_TIMEOUT' });
+            const stream = await waitForAudioStep(microphone, signal, 20000, permissionTimeout);
+            if (this.closed) return;
             stream.getAudioTracks().forEach(track => {
                 track.onended = () => { if (!this.closed) this.callbacks.onError(new Error('ไมโครโฟนถูกตัดการเชื่อมต่อ')); };
                 track.onmute = () => {
@@ -83,10 +97,19 @@
                 if (track.muted) track.onmute();
             });
             this.source = this.context.createMediaStreamSource(stream);
+            this.callbacks.onPreparation?.('กำลังโหลดตัวตรวจจับเสียงพูด');
+            const modelDownload = new AbortController();
             try {
                 if (!root.vad?.AudioNodeVAD || !root.ort) throw new Error('VAD assets unavailable');
-                this.detector = await root.vad.AudioNodeVAD.new(this.context, {
-                    workletURL: '/vad-web/vad.worklet.bundle.min.js', modelURL: '/vad-web/silero_vad.onnx',
+                const modelURL = '/vad-web/silero_vad.onnx';
+                // Fetch the model while VAD registers its worklet.
+                const modelBytes = root.fetch(modelURL, { signal: modelDownload.signal }).then(response => {
+                    if (!response.ok) throw new Error(`โหลด Silero ไม่สำเร็จ (HTTP ${response.status})`);
+                    return response.arrayBuffer();
+                });
+                modelBytes.catch(() => {});
+                const loading = root.vad.AudioNodeVAD.new(this.context, {
+                    workletURL: '/vad-web/vad.worklet.bundle.min.js', modelURL, modelFetcher: () => modelBytes,
                     ortConfig: runtime => { runtime.env.wasm.wasmPaths = '/ort/'; },
                     frameSamples: 512, workletOptions: { processorOptions: { frameSamples: 512 } },
                     positiveSpeechThreshold: 0.5, negativeSpeechThreshold: 0.35,
@@ -99,8 +122,12 @@
                         if (this.inputSuppressed || this.inputMuted || this.processingInputEpoch !== this.inputEpoch) return;
                         if (!this.finishSegment()) this.callbacks.onMisfire();
                     }
+                }).then(detector => {
+                    if (this.closed || modelDownload.signal.aborted) detector.destroy();
+                    return detector;
                 });
-                if (this.closed) { this.detector.destroy(); return; }
+                this.detector = await waitForAudioStep(loading, signal, SILERO_START_TIMEOUT_MS, new Error('โหลดตัวตรวจจับเสียงพูดนานเกินไป'));
+                if (this.closed) return;
                 // Serialize ONNX inference: slow frames must not mutate model state concurrently.
                 const processFrame = this.detector.processFrame.bind(this.detector);
                 let frames = Promise.resolve(), pending = 0;
@@ -134,15 +161,18 @@
                 this.detector.start();
                 this.kind = 'silero';
             } catch (error) {
+                modelDownload.abort();
                 if (this.closed) return;
                 this.detector?.destroy(); this.detector = null;
                 console.warn('[Voice] Silero unavailable; AudioWorklet fallback:', error.message);
-                await this.startFallback();
+                this.callbacks.onPreparation?.('กำลังเปิดตัวตรวจจับเสียงสำรอง');
+                await waitForAudioStep(this.startFallback(), signal, 4000, new Error('โหลดตัวตรวจจับเสียงสำรองไม่สำเร็จ กรุณาตรวจการเชื่อมต่อ'));
                 this.kind = 'rms';
             }
+            if (this.closed) return;
             this.ready = true;
-            // Preload familiar command replies; question pieces are fetched as needed.
-            for (const key of root.SmartVoiceFeedback?.preloadKeys || []) this.loadClip(key).catch(() => {});
+            // The wake acknowledgement is latency-sensitive. Fetch other replies when used.
+            this.loadClip('wake-ready').catch(() => {});
         }
         speechStart() {
             if (this.closed || this.inputSuppressed || this.inputMuted) return;

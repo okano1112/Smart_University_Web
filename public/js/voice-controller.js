@@ -58,13 +58,11 @@
             this.device = this.options.device(); this.handsFree = handsFree; this.failures = 0; this.setState('INIT', 'กำลังเตรียมไมโครโฟน');
             const audio = this.options.audio({ onStart: () => this.onStart(epoch), onEnd: samples => { void this.onEnd(samples, epoch); },
                 onMisfire: reason => this.onMisfire(epoch, reason), onError: error => this.fatal(error, epoch),
+                onPreparation: label => { if (this.active(epoch) && this.state === 'INIT') this.setState('INIT', label); },
                 onAvailability: available => this.onAvailability(epoch, available) });
             this.audio = audio;
             try {
-                let timer;
-                try {
-                    await Promise.race([audio.start({ automatic }), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('เตรียมไมค์นานเกินไป กรุณาเปิดไมค์ใหม่')), 15000); })]);
-                } finally { clearTimeout(timer); }
+                await audio.start({ automatic });
                 if (!this.active(epoch)) { audio.close(); return false; }
                 this.setState('INIT', 'กำลังโหลดโมเดลเสียงบนเซิร์ฟเวอร์');
                 const data = await this.json('/api/voice-session', { device: this.device }, epoch, SESSION_START_TIMEOUT_MS);

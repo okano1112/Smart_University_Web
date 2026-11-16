@@ -1,0 +1,13 @@
+{
+  "name": "bimclub-room",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-11-16",
+  "workers_dev": true,
+  "preview_urls": false,
+  "vpc_services": [
+    {
+      "binding": "BIMCLUB_ORIGIN",
+      "service_id": "REPLACE_WITH_VPC_SERVICE_ID"
+    }
+  ]
+}

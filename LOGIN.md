@@ -13,4 +13,6 @@ npm start
 
 Node.js ฟังที่ `127.0.0.1:3000` ให้ Cloudflare Tunnel หรือ Tailscale Serve บนเครื่องเดียวกันชี้ไปที่พอร์ตนี้ เปิดจากภายนอกผ่าน HTTPS ที่รากของโดเมนย่อย โดยให้ Tunnel ส่ง Host ของโดเมนจริงไปยังเว็บ คุกกี้สำหรับโดเมน HTTPS ใช้ Secure หน้าเว็บและ API ต้องมีเซสชันที่ผ่านการตรวจ
 
+สำหรับ URL คงที่แบบฟรี `.workers.dev` ใช้ Worker เชื่อมผ่าน VPC Service และ Tunnel ตาม [คู่มือ Cloudflare Worker](cloudflare/README.md)
+
 บัญชีนี้ควบคุมการเข้าถึงเว็บและ API ของ BimClub สำหรับการจำกัดสิทธิ์บน MQTT ต้องกำหนดที่โบรกเกอร์แยกต่างหาก

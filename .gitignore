@@ -16,3 +16,4 @@ models/movenet-multipose.tflite
 .DS_Store
 
 node_modules/
+.wrangler/

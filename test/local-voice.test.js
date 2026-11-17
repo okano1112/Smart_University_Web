@@ -20,6 +20,23 @@ test('a server missing the configured Python interpreter reports a setup error',
   }
 });
 
+test('closing a worker during boot releases all readiness waits and permits a clean restart', { timeout: 100000 }, async () => {
+  const worker = new LocalVoice({ engine: 'tflite' });
+  try {
+    const starting = worker.start();
+    const waiting = worker.classify(Buffer.from('voice'));
+    const other = worker.classify(Buffer.from('other'));
+    const queued = Promise.all([assert.rejects(waiting, { status: 503 }), assert.rejects(other, { status: 503 })]);
+    // A cold restart must obey the same queue limit as a warm worker.
+    await assert.rejects(worker.classify(Buffer.from('overflow')), { status: 503 });
+    const closed = assert.rejects(starting, { status: 503 });
+    worker.close();
+    await Promise.all([closed, queued]);
+    await worker.start();
+    assert.ok(worker.child);
+  } finally { worker.close(); }
+});
+
 test('real local TFLite worker: command fixtures, silence, invalid audio, cancellation and recovery', { timeout: 100000 }, async () => {
   const worker = new LocalVoice({engine:'tflite'});
   try {
@@ -42,5 +59,33 @@ test('real local TFLite worker: command fixtures, silence, invalid audio, cancel
     const cancel = new AbortController(); cancel.abort();
     await assert.rejects(worker.classify(silent, cancel.signal));
     assert.equal((await worker.classify(silent, signal)).accepted, false);
+  } finally { worker.close(); }
+});
+
+test('aborted queued speech is never sent to Python and frees capacity for the next capture', { timeout: 100000 }, async t => {
+  const worker = new LocalVoice({ engine: 'tflite' });
+  try {
+    await worker.start();
+    const { stdin, stdout } = worker.child;
+    const writes = [];
+    t.mock.method(stdin, 'write', chunk => { writes.push(JSON.parse(chunk)); return true; });
+    const nextTurn = () => new Promise(resolve => setImmediate(resolve));
+    const first = worker.classify(Buffer.from('first'));
+    const queuedController = new AbortController();
+    const queued = worker.classify(Buffer.from('queued'), queuedController.signal);
+    const canceled = assert.rejects(queued, { name: 'AbortError' });
+    await nextTurn();
+    assert.equal(writes.length, 1);
+    await assert.rejects(worker.classify(Buffer.from('occupied')), { status: 503 });
+    queuedController.abort();
+    await canceled;
+    const next = worker.classify(Buffer.from('next'));
+    await nextTurn();
+    assert.equal(writes.length, 1);
+    stdout.emit('data', `${JSON.stringify({ id: writes[0].id, accepted: true })}\n`);
+    assert.equal((await first).accepted, true);
+    assert.deepEqual(writes.map(request => Buffer.from(request.audio, 'base64').toString()), ['first', 'next']);
+    stdout.emit('data', `${JSON.stringify({ id: writes[1].id, accepted: true })}\n`);
+    assert.equal((await next).accepted, true);
   } finally { worker.close(); }
 });

@@ -89,6 +89,78 @@ test('English wake requires a verified prefix; ordinary Andy does not wake', () 
  }), null);
 });
 
+test('re-aligned short audio can open a wake window only for an isolated name', () => {
+ const prediction = {
+  engine: 'LOCAL_WHISPER', accepted: true, noSpeechProbability: .01,
+  wakeCandidates: [{ transcript: 'เอ็นที่', score: -.2 }],
+  wakeShortAcoustics: [{ name: 'เอ็นจี้', score: -1, consonant: .04, ending: .41 }]
+ };
+ assert.equal(verifiedWakeTranscript(prediction), 'เอ็นจี้');
+ assert.equal(verifiedWakeTranscript({ ...prediction, wakeCandidates: [{ transcript: 'เอ็นที่ เปิดแอร์', score: -.2 }] }), null);
+ assert.equal(verifiedWakeTranscript({ ...prediction, wakeShortAcoustics: [{ name: 'เอ็นจี้', score: -1, consonant: .005, ending: .41 }] }), null);
+});
+
+test('an exact English command supported by a phonetic beam still rejects conflicting actions', () => {
+ const prediction = {
+  engine: 'LOCAL_WHISPER', accepted: true, noSpeechProbability: .001,
+  wakeAcoustics: [{ name: 'เอ็นกี่', score: -.8, consonant: .5, ending: .5 }],
+  wakeCandidates: ['เอ็งเกี่ยวกับเอ็งเกี่ยว', 'เอ็งเกี่ยวกับธนาคาร', 'เอ็งเกี่ยวกับตัว AC', 'เอ็งกี่ เชิญกับ AC']
+   .map((transcript, index) => ({ transcript, score: -.65 - .05 * index })),
+  wakeEnglish: { noSpeechProbability: .001, candidates: [
+   { transcript: 'Engi. Turn on AC.', score: -.59 }, { transcript: 'Engi, churn on AC.', score: -.69 }
+  ] }
+ };
+ assert.deepEqual(parseSpeech(verifiedWakeTranscript(prediction)).commands, ['ON']);
+ const conflicting = { transcript: 'Engi, churn off AC.', score: -.72 };
+ assert.equal(verifiedWakeTranscript({ ...prediction, wakeEnglish: {
+  ...prediction.wakeEnglish, candidates: [...prediction.wakeEnglish.candidates, conflicting]
+ } }), null);
+ assert.equal(verifiedWakeTranscript({ ...prediction, wakeEnglish: {
+  ...prediction.wakeEnglish, candidates: prediction.wakeEnglish.candidates.slice(1)
+ } }), null);
+});
+
+test('a misheard English verb needs a close literal command and a verified name', () => {
+ const prediction = {
+  engine: 'LOCAL_WHISPER', accepted: true, noSpeechProbability: .001,
+  wakeAcoustics: [{ name: 'เอ็นกี่', score: -.70, consonant: .50, ending: .55 }],
+  wakeCandidates: [{ transcript: 'เอ็งกี่ เชิญกับภาษี', score: -.76 }],
+  wakeEnglish: { noSpeechProbability: .001, candidates: [
+   { transcript: 'Engi, churn on the AC.', score: -.55 },
+   { transcript: 'Engi. Turn on AC.', score: -.61 },
+  ] }
+ };
+ const resolve = (candidates, options = {}) => parseSpeech(verifiedWakeTranscript({
+  ...prediction, ...options, wakeEnglish: { ...prediction.wakeEnglish, candidates }
+ })).commands;
+ const [top, literal] = prediction.wakeEnglish.candidates;
+ assert.deepEqual(resolve([top, literal]), ['ON']);
+ assert.equal(resolve([top]), undefined);
+ assert.equal(resolve([top, { ...literal, score: -.73 }]), undefined);
+ assert.equal(resolve([top, literal], { wakeAcoustics: [] }), undefined);
+ assert.equal(resolve([top, literal, { transcript: 'Engi, turn off AC.', score: -.65 }]), undefined);
+ assert.equal(resolve([{ ...top, transcript: 'Andy, churn on AC.' }, literal]), undefined);
+});
+
+test('the Thai word-boundary variant needs acoustic evidence and an unchanged command', () => {
+ const prediction = {
+  engine: 'LOCAL_WHISPER', accepted: true, noSpeechProbability: .001,
+  wakeAcoustics: [{ name: 'เอ็นจี้', score: -.44, consonant: .24, ending: .71 }],
+  wakeCandidates: [
+   { transcript: 'เป็นที่เปิดแอร์ให้ผม', score: -.14 },
+   { transcript: 'เอ็นที่เปิดแอร์ให้ผม', score: -.15 },
+   { transcript: 'เอ็นจี้เปิดแอร์ให้ผม', score: -.17 }
+  ]
+ };
+ const [top, near, exact] = prediction.wakeCandidates;
+ assert.deepEqual(parseSpeech(verifiedWakeTranscript(prediction)).commands, ['ON']);
+ assert.equal(verifiedWakeTranscript({ ...prediction, wakeAcoustics: [] }), null);
+ assert.equal(verifiedWakeTranscript({ ...prediction, wakeCandidates: [top, exact] }), null);
+ assert.equal(verifiedWakeTranscript({ ...prediction, wakeCandidates: [top, near, exact,
+  { transcript: 'เอ็นจี้ปิดแอร์ให้ผม', score: -.20 }
+ ] }), null);
+});
+
 test('voice recovery does not infer unrelated NG, negated actions or status questions', () => {
  const result = { engine: 'LOCAL_WHISPER', accepted: true, noSpeechProbability: .02,
   wakeAcoustics: [{ name: 'เอ็นจี', score: -1.1, consonant: .127, ending: .736 }],

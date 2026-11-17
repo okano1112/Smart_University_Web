@@ -20,6 +20,8 @@ from faster_whisper.transcribe import get_compression_ratio, get_suppressed_toke
 ROOT = Path(__file__).resolve().parents[1]
 WAKE_PROBE = re.compile(r'^(?:เอ็?น|เอ็ง|เอน|อิง|อันดี|eng[ih]|enji|n[ .-]?g\b|andy\b)', re.I)
 HARD_WAKE_PROBE = re.compile(r'^(?:เอ็นก[ีิ][่้]?|เอ็งก[ีิ][่้]?|เอ็นด์ก[ีิ][่้]?)')
+THAI_WAKE_BOUNDARY = re.compile(r'^เป็น\s*ที่')
+THAI_WAKE_NEAR = re.compile(r'^เอ็น\s*ที่')
 
 class Recognizer:
     def __init__(self):
@@ -85,13 +87,30 @@ class Recognizer:
         leads = [re.sub(r'^(?:hey|hi|hello|เฮ้ย?|เฮย|เฮ|หวัดดี|วัดดี|สวัสดี)[\s,.!]*', '', c['transcript'].lower()).lstrip()
             for c in candidates]
         hard = any(HARD_WAKE_PROBE.match(text) for text in leads)
-        if WAKE_PROBE.match(leads[0]) or hard:
+        shifted_thai = THAI_WAKE_BOUNDARY.match(leads[0]) and any(THAI_WAKE_NEAR.match(text) for text in leads[1:])
+        if WAKE_PROBE.match(leads[0]) or hard or shifted_thai:
             names = ('เอ็นกี่', 'เอ็งกี้') if hard else ('เอ็นจี้', 'เอ็นจี')
             try:
                 output['wakeAcoustics'] = [self.acoustic_prefix(encoded, features.shape[-1], name) for name in names]
             except (ValueError, RuntimeError, IndexError):
                 # No alignment means no acoustic fallback; keep usable neutral text.
                 output['wakeAcoustics'] = []
+            if (not hard and len(audio) <= 32000 and no_speech < .08 and first['score'] >= -1.15
+                    and re.fullmatch(r'เอ็น\s*ที่[.!?]*', leads[0])
+                    and not any(e['score'] >= -1.6 and e['consonant'] >= .012 and e['ending'] >= .16 for e in output['wakeAcoustics'])):
+                # Re-align only a short, ambiguous Thai name with browser pre-roll.
+                # Keep the second alignment separate so it cannot authorize a command suffix.
+                active = np.flatnonzero(np.abs(audio) >= np.max(np.abs(audio)) * .006)
+                if active.size and active[0] >= 1600 and active[-1] - active[0] < 16000:
+                    onset = int(active[0])
+                    end = int(active[-1])
+                    normalized = np.pad(audio[onset - 80:end + 3280], (1600, 0))
+                    short_features = self.model.feature_extractor(normalized)[..., :-1]
+                    try:
+                        short_encoded = self.model.encode(pad_or_trim(short_features))
+                        output['wakeShortAcoustics'] = [self.acoustic_prefix(short_encoded, short_features.shape[-1], 'เอ็นจี้')]
+                    except (ValueError, RuntimeError, IndexError):
+                        pass
         if hard or re.match(r'^(?:eng[ih]|enji|n[ .-]?g\b)', leads[0]):
             english, probability = self.wake_beams(encoded, self.english_tokenizer,
                 self.english_prompt, self.english_suppressed_tokens, 4)

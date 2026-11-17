@@ -97,6 +97,7 @@
                 if (track.muted) track.onmute();
             });
             this.source = this.context.createMediaStreamSource(stream);
+            this.callbacks.onMicReady?.();
             this.callbacks.onPreparation?.('กำลังโหลดตัวตรวจจับเสียงพูด');
             const modelDownload = new AbortController();
             try {
@@ -270,7 +271,13 @@
             const id = ++this.replyId;
             this.setInputSuppressed(true);
             try {
-                const buffers = await Promise.all(feedback.clips.map(key => this.loadClip(key)));
+                let buffers;
+                try { buffers = await Promise.all(feedback.clips.map(key => this.loadClip(key))); }
+                catch (error) {
+                    if (this.closed || id !== this.replyId) return false;
+                    if (feedback.clips.length === 1 && feedback.clips[0] === 'wake-ready') return await this.beep('ready');
+                    throw error;
+                }
                 if (this.closed || id !== this.replyId) return false;
                 return await new Promise((resolve, reject) => {
                     const sources = [], total = buffers.reduce((sum, buffer) => sum + buffer.duration, 0);
@@ -309,9 +316,13 @@
             if (type === 'confirmed') oscillator.frequency.setValueAtTime(1800, now + 0.09);
             gain.gain.setValueAtTime(0.08, now); gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
             return new Promise(resolve => {
-                const done = () => { clearTimeout(timer); oscillator.disconnect(); gain.disconnect(); resolve(); };
-                const timer = setTimeout(done, duration * 1000 + 150);
-                oscillator.onended = done; oscillator.start(now); oscillator.stop(now + duration);
+                const done = played => {
+                    clearTimeout(timer); oscillator.onended = null;
+                    oscillator.disconnect(); gain.disconnect(); resolve(played);
+                };
+                const timer = setTimeout(() => done(false), duration * 1000 + 150);
+                oscillator.onended = () => done(!this.closed && this.context.state === 'running');
+                oscillator.start(now); oscillator.stop(now + duration);
             });
         }
         close() {

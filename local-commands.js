@@ -35,8 +35,8 @@ function verifiedWakeTranscript(result) {
   const [first, ...rest] = result.wakeCandidates.slice(0, 6);
   if (!valid(first)) return null;
   const topText = normalize(first.transcript), exact = wakeStart.test(topText);
-  const acoustic = (names, score, consonant, ending) =>
-    Array.isArray(result.wakeAcoustics) && result.wakeAcoustics.some(e => names.includes(e?.name) &&
+  const acoustic = (names, score, consonant, ending, evidence = result.wakeAcoustics) =>
+    Array.isArray(evidence) && evidence.some(e => names.includes(e?.name) &&
       Number.isFinite(e.score) && e.score >= score &&
       Number.isFinite(e.consonant) && e.consonant >= consonant && e.consonant <= 1 &&
       Number.isFinite(e.ending) && e.ending >= ending && e.ending <= 1);
@@ -52,6 +52,11 @@ function verifiedWakeTranscript(result) {
   const hardName = acoustic(['เอ็นกี่', 'เอ็งกี้'], -1.4, .20, .24);
   if (valid(englishTop) && englishTop.score >= -.85 && Number.isFinite(english.noSpeechProbability) && english.noSpeechProbability < .6) {
     const englishText = normalize(englishTop.transcript);
+    // Compare the observed "churn" mishearing for agreement or conflict.
+    // A power command still needs a hypothesis with the actual verb.
+    const normalizeTurn = text => text.replace(/\bchurn(?=\s+(?:on|off)\b)/i, 'turn');
+    const englishAlternatives = englishRest.map(c => valid(c)
+      ? { ...c, transcript: normalizeTurn(c.transcript) } : c);
     const nearEnglishTail = afterLead(englishText, /^(?:endi|andy)(?=$|[\s,.!?])/);
     const likelyHardLead = [first, ...rest.slice(0, 2)].some(c => valid(c) && afterLead(normalize(c.transcript), hardStart) !== null);
     const englishIntent = parseSpeech(englishText);
@@ -59,15 +64,40 @@ function verifiedWakeTranscript(result) {
     const matchingExact = exact && (englishIntent.wakeOnly ||
       (englishIntent.query && thaiIntent.query === englishIntent.query) ||
       (englishIntent.commands && thaiIntent.commands?.join('|') === englishIntent.commands.join('|')));
-    const named = englishIntent.hasWakeWord && (matchingExact || (likelyHardLead && hardName) || (softName && afterNear(topText) !== null))
+    // Browser VAD padding can move the phonetic name down the Thai beams.
+    // Accept lower ranks only with a close Thai hypothesis, acoustic evidence,
+    // and independent English hypotheses agreeing on the named action.
+    const corroborated = englishIntent.hasWakeWord && hardName && !likelyHardLead && actionable(englishIntent) &&
+      rest.some(c => valid(c) && first.score - c.score <= .20 && afterLead(normalize(c.transcript), hardStart) !== null) &&
+      englishAlternatives.some(c => {
+        if (!valid(c) || englishTop.score - c.score > .20) return false;
+        const intent = parseSpeech(c.transcript);
+        return intent.hasWakeWord && ((englishIntent.query && intent.query === englishIntent.query) ||
+          (englishIntent.commands && intent.commands?.join('|') === englishIntent.commands.join('|')));
+      });
+    const named = englishIntent.hasWakeWord && (matchingExact || (likelyHardLead && hardName) || corroborated || (softName && afterNear(topText) !== null))
       ? englishTop.transcript : null;
     // A spelling like Endi is not a command prefix unless the independent
     // Thai-language pass and the hard-G acoustic measurement both support it.
     const nearEnglishIntent = nearEnglishTail ? parseSpeech(nearEnglishTail) : null;
     const recovered = hardName && likelyHardLead && nearEnglishIntent && actionable(nearEnglishIntent)
       ? 'Engi ' + nearEnglishTail : null;
+    if (hardName && likelyHardLead && englishIntent.hasWakeWord && englishIntent.reason === 'unmatched') {
+      const corrected = normalizeTurn(englishText);
+      const correctedCommands = corrected !== englishText ? parseSpeech(corrected).commands : null;
+      const power = correctedCommands?.[0];
+      if (correctedCommands?.length === 1 && (power === 'ON' || power === 'OFF')) {
+        const literal = englishRest.find(c => {
+          if (!valid(c) || englishTop.score - c.score > .15) return false;
+          const intent = parseSpeech(c.transcript);
+          return intent.hasWakeWord && intent.commands?.length === 1 && intent.commands[0] === power;
+        });
+        if (literal && !conflicts(englishAlternatives, englishTop.score, literal.transcript) &&
+            !conflicts([first, ...rest], first.score, literal.transcript)) return literal.transcript;
+      }
+    }
     const transcript = named || recovered;
-    if (transcript && !conflicts(englishRest, englishTop.score, transcript) &&
+    if (transcript && !conflicts(englishAlternatives, englishTop.score, transcript) &&
         !conflicts([first, ...rest], first.score, transcript)) return transcript;
   }
 
@@ -80,6 +110,24 @@ function verifiedWakeTranscript(result) {
   if (first.score >= -1.2 && hardName && shortHardLeads.length >= 1 &&
       (standaloneVariant || afterLead(topText, hardStart) === '') &&
       ![first, ...rest].some(c => valid(c) && first.score - c.score <= .26 && actionable(parseSpeech(c.transcript)))) return 'เอ็นจี้';
+
+  const thaiLead = topText.replace(greeting, '');
+  if (/^เป็น\s*ที่/.test(thaiLead)) {
+    // Browser timing can shift the initial syllable of เอ็นจี้. The
+    // resulting เป็นที่ is an ordinary phrase and requires stronger proof.
+    const tail = afterNear(thaiLead.replace(/^เป็น/, 'เอ็น'));
+    if (!tail || !acoustic(['เอ็นจี้'], -.8, .12, .55)) return null;
+    const suffix = compactWakeTail(tail);
+    const close = rest.filter(c => valid(c) && first.score - c.score <= .12);
+    const nearMatch = close.some(c => {
+      const text = normalize(c.transcript).replace(greeting, '');
+      return /^เอ็น\s*ที่/.test(text) && compactWakeTail(afterNear(text) ?? '') === suffix;
+    });
+    const exactMatch = close.find(c => compactWakeTail(afterLead(normalize(c.transcript), wakeStart) ?? '') === suffix);
+    if (nearMatch && exactMatch && actionable(parseSpeech(exactMatch.transcript)) &&
+        !conflicts(rest, first.score, exactMatch.transcript)) return exactMatch.transcript;
+    return null;
+  }
 
   const near = afterNear(topText);
   if (near === null) return null;
@@ -101,7 +149,9 @@ function verifiedWakeTranscript(result) {
   if (found && (first.score >= -.7 || (softName && first.score >= -1.1)) &&
       !conflicts(rest, first.score, found.transcript)) return found.transcript;
 
-  if (softName && first.score >= -1.15 && parseSpeech('เอ็นจี้ ' + near).wakeOnly &&
+  const shortName = Array.isArray(result.wakeShortAcoustics) && result.noSpeechProbability < .08 &&
+    suffix === '' && acoustic(['เอ็นจี้'], -1.25, .025, .28, result.wakeShortAcoustics);
+  if ((softName || shortName) && first.score >= -1.15 && parseSpeech('เอ็นจี้ ' + near).wakeOnly &&
       !rest.some(candidate => valid(candidate) && first.score - candidate.score <= .20 &&
         actionable(parseSpeech(afterNear(normalize(candidate.transcript)) ?? candidate.transcript)))) return 'เอ็นจี้';
 

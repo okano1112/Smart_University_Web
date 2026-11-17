@@ -15,6 +15,9 @@
         clearWake() {
             this.followUp = false; this.commandDeadline = 0; this.wakeToken = null; this.armPromise = null; this.claimPromise = null;
         }
+        discardQueuedSpeech() {
+            this.queue = []; this.queueSpeaking = false; this.queueRevision = undefined; this.endQueueWait?.();
+        }
         async json(url, body, epoch, timeout = 14000) {
             const controller = new AbortController(); this.controllers.add(controller);
             const start = url === '/api/voice-session';
@@ -23,8 +26,9 @@
             try {
                 const response = await this.options.fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal });
                 const data = await response.json().catch(() => null);
-                if (!this.active(epoch)) {
+                if (!this.active(epoch) || controller.signal.aborted) {
                     if (start && data?.sessionId) this.cancelSession(data.sessionId);
+                    controller.signal.throwIfAborted();
                     throw new Error('CANCELLED');
                 }
                 if (!response.ok || !data || (start && typeof data.sessionId !== 'string')) {
@@ -47,27 +51,63 @@
             this.epoch++; this.clearTimer(); clearInterval(this.keepAliveTimer); clearTimeout(this.deviceTimer);
             for (const c of this.controllers) c.abort(); this.controllers.clear();
             this.audio?.close(); this.audio = null; this.sessionId = null; this.commandId = null;
-            this.queue = []; this.queueSpeaking = false; this.endQueueWait?.();
+            this.discardQueuedSpeech();
             this.clearWake(); this.inputVersion = 0; this.micMuted = false; this.handsFree = false; this.setState('OFF');
             if (session) this.cancelSession(session);
+        }
+        async connectSession(epoch) {
+            const session = await this.json('/api/voice-session', { device: this.device }, epoch, SESSION_START_TIMEOUT_MS);
+            if (!this.active(epoch)) { this.cancelSession(session.sessionId); return; }
+            this.sessionId = session.sessionId; this.engine = session.engine;
+        }
+        async pingSession(epoch) {
+            const session = this.sessionId;
+            if (!this.active(epoch) || !session) return;
+            try { await this.json('/api/voice-session/ping', this.body(), epoch, 5000); }
+            catch (error) {
+                // A transport glitch during idle listening should not tear down the mic.
+                if (error.status === 410 && this.sessionId === session) await this.reconnectSession(epoch);
+            }
+        }
+        async reconnectSession(epoch) {
+            if (!this.active(epoch) || !this.sessionId) return;
+            this.sessionId = null;
+            this.inputVersion++;
+            this.commandRequest?.abort();
+            this.clearTimer(); this.clearWake(); this.discardQueuedSpeech();
+            this.setState('RECOVERING', 'กำลังเชื่อมต่อเซสชันเสียงใหม่');
+            this.audio.resetInput?.();
+            try {
+                await this.connectSession(epoch);
+                if (this.active(epoch)) { this.audio.resetInput?.(); this.listen(epoch); }
+            } catch (error) {
+                if (this.active(epoch)) this.fatal(error, epoch);
+            }
         }
         async start(handsFree, { automatic = false } = {}) {
             if (this.options.canStart?.() === false) return false;
             this.lastStartError = null; this.stop();
             const epoch = this.epoch;
             this.device = this.options.device(); this.handsFree = handsFree; this.failures = 0; this.setState('INIT', 'กำลังเตรียมไมโครโฟน');
+            let connection;
+            const beginConnection = () => {
+                if (connection || !this.active(epoch)) return;
+                connection = this.connectSession(epoch);
+                connection.catch(() => {});
+            };
             const audio = this.options.audio({ onStart: () => this.onStart(epoch), onEnd: samples => { void this.onEnd(samples, epoch); },
                 onMisfire: reason => this.onMisfire(epoch, reason), onError: error => this.fatal(error, epoch),
                 onPreparation: label => { if (this.active(epoch) && this.state === 'INIT') this.setState('INIT', label); },
-                onAvailability: available => this.onAvailability(epoch, available) });
+                onAvailability: available => this.onAvailability(epoch, available), onMicReady: beginConnection });
             this.audio = audio;
             try {
                 await audio.start({ automatic });
                 if (!this.active(epoch)) { audio.close(); return false; }
-                this.setState('INIT', 'กำลังโหลดโมเดลเสียงบนเซิร์ฟเวอร์');
-                const data = await this.json('/api/voice-session', { device: this.device }, epoch, SESSION_START_TIMEOUT_MS);
-                this.sessionId = data.sessionId; this.engine = data.engine;
-                this.keepAliveTimer = setInterval(() => { this.json('/api/voice-session/ping', this.body(), epoch, 5000).catch(error => this.fatal(error, epoch)); }, 4 * 60 * 1000);
+                if (!this.sessionId) this.setState('INIT', 'กำลังโหลดโมเดลเสียงบนเซิร์ฟเวอร์');
+                beginConnection();
+                await connection;
+                if (!this.active(epoch)) return false;
+                this.keepAliveTimer = setInterval(() => { void this.pingSession(epoch); }, 4 * 60 * 1000);
                 if (!handsFree) {
                     this.setState('READY'); await audio.beep('ready');
                     if (!this.active(epoch)) return false;
@@ -122,13 +162,13 @@
         async openCommandWindow(data, epoch, inputVersion) {
             // Start a new utterance after the actual acknowledgement. Background
             // speech captured before recognizing the wake word cannot inherit a token.
-            this.queue = []; this.queueSpeaking = false; this.endQueueWait?.();
+            this.discardQueuedSpeech();
+            if (this.handsFree && !data.wakeToken) throw new Error('ไม่ได้รับสิทธิ์รับคำสั่ง กรุณาเรียกเอ็นจี้ใหม่');
             this.followUp = true;
-            const acknowledged = await this.say(data.feedback, epoch);
+            const acknowledged = await this.say(data.feedback, epoch, inputVersion);
             if (!this.active(epoch) || inputVersion !== this.inputVersion) return;
             if (this.handsFree) {
                 if (!acknowledged) { this.clearWake(); this.rest(epoch); return; }
-                if (!data.wakeToken) throw new Error('ไม่ได้รับสิทธิ์รับคำสั่ง กรุณาเรียกเอ็นจี้ใหม่');
                 this.wakeToken = data.wakeToken; this.claimPromise = null;
                 this.setState('READY');
                 this.armPromise = this.json('/api/voice-session/arm', this.body({wakeToken:this.wakeToken}), epoch, 4000);
@@ -169,9 +209,9 @@
             this.micMuted = !available;
             this.inputVersion++;
             this.commandRequest?.abort();
-            this.queue = []; this.queueSpeaking = false; this.endQueueWait?.();
-            this.clearWake(); this.clearTimer();
-            if (!this.sessionId) return;
+            this.discardQueuedSpeech(); this.clearWake();
+            if (!this.sessionId || this.state === 'INIT' || this.state === 'RECOVERING') return;
+            this.clearTimer();
             if (!available) this.setState('MIC_PAUSED');
             else this.listen(epoch);
         }
@@ -211,11 +251,17 @@
                 const form = new FormData();
                 for (const [key, value] of Object.entries(this.body({ requestId, stage: this.handsFree ? token ? 'command' : 'continuous' : 'direct', wakeToken: token || '', currentAc: desired }))) form.append(key, value);
                 form.append('audio', this.options.wav(samples), 'voice.wav');
+                const requestStartedAt = performance.now();
                 const response = await this.options.fetch('/api/voice-command', { method: 'POST', body: form, signal: controller.signal });
-                const data = await response.json();
+                const data = await response.json().catch(() => null);
+                const requestMs = Math.round(performance.now() - requestStartedAt);
                 if (!this.active(epoch)) { if (this.epoch === epoch) this.stop(); return; }
                 if (inputVersion !== this.inputVersion) return;
-                if (!response.ok) throw Object.assign(new Error(data.message || 'โมเดลในเครื่องไม่พร้อม'), { status: response.status });
+                controller.signal.throwIfAborted();
+                if (!response.ok || !data) {
+                    const message = data?.message || `เซิร์ฟเวอร์เสียงตอบกลับผิดปกติ (HTTP ${response.status})`;
+                    throw Object.assign(new Error(message), { status: response.status });
+                }
                 if (data.requestId !== requestId) throw new Error('ผลคำสั่งเสียงไม่ตรงกับคำขอ กรุณาพูดใหม่');
                 this.failures = 0;
                 if (token) this.clearWake();
@@ -223,17 +269,22 @@
                 if (!ignored && (data.followUp || data.wakeOnly)) {
                     await this.openCommandWindow(data, epoch, inputVersion); return;
                 }
-                await this.finishQueuedSpeech(epoch);
-                if (!this.active(epoch) || inputVersion !== this.inputVersion) return;
-                if (ignored) { this.rest(epoch); return; }
+                if (ignored) {
+                    await this.finishQueuedSpeech(epoch);
+                    if (inputVersion === this.inputVersion) this.rest(epoch);
+                    return;
+                }
                 if (!data.success) {
                     this.options.notice(data.message || 'ไม่เข้าใจคำสั่ง กรุณาพูดใหม่', 'warning', 5000);
-                    await this.say(data.feedback || { text: 'ไม่เข้าใจคำสั่งครับ กรุณาพูดใหม่', clips: ['not-understood'] }, epoch);
-                    this.rest(epoch); return;
+                    await this.say(data.feedback || { text: 'ไม่เข้าใจคำสั่งครับ กรุณาพูดใหม่', clips: ['not-understood'] }, epoch, inputVersion);
+                    if (inputVersion === this.inputVersion) this.rest(epoch);
+                    return;
                 }
                 if (Object.hasOwn(data, 'query')) {
                     // Read observations when the answer is ready, independent of
                     // AC revisions since capture. A query cannot fall through to send().
+                    await this.finishQueuedSpeech(epoch);
+                    if (!this.active(epoch) || inputVersion !== this.inputVersion) return;
                     this.clearWake();
                     const feedback = QUERIES.has(data.query) ? this.options.answer?.(data.query) : null;
                     if (typeof feedback?.text !== 'string' || !feedback.text.trim() || !Array.isArray(feedback.clips) || !feedback.clips.length) {
@@ -241,7 +292,7 @@
                     } else {
                         this.options.notice(feedback.text, 'info', 6500);
                         this.options.log('info', `เอ็นจี้ตอบ: ${feedback.text}`);
-                        await this.say(feedback, epoch);
+                        await this.say(feedback, epoch, inputVersion);
                     }
                     if (inputVersion === this.inputVersion) this.rest(epoch);
                     return;
@@ -253,40 +304,60 @@
                 const beforeRevision = this.options.revision?.();
                 const validate = () => this.active(epoch) && inputVersion === this.inputVersion && !controller.signal.aborted &&
                     JSON.stringify(this.options.current()) === desired && this.options.revision?.() === revision;
+                const sendStartedAt = performance.now();
                 const sent = await this.options.send(data.nextState, `${data.label} [โมเดลในเครื่อง]`, { validate, signal: controller.signal });
+                const sendMs = Math.round(performance.now() - sendStartedAt);
                 if (!this.active(epoch) || inputVersion !== this.inputVersion) return;
-                if (!sent) { await this.say({ text: 'ยังส่งคำสั่งไม่ได้ครับ กรุณาตรวจสอบการเชื่อมต่อ', clips: ['not-sent'] }, epoch); this.rest(epoch); return; }
-                for (const packet of this.queue) if (packet.revision === beforeRevision) packet.revision = this.options.revision?.();
+                if (!sent) {
+                    await this.say({ text: 'ยังส่งคำสั่งไม่ได้ครับ กรุณาตรวจสอบการเชื่อมต่อ', clips: ['not-sent'] }, epoch, inputVersion);
+                    if (inputVersion === this.inputVersion) this.rest(epoch);
+                    return;
+                }
+                const afterRevision = this.options.revision?.();
+                for (const packet of this.queue) if (packet.revision === beforeRevision) packet.revision = afterRevision;
+                if (this.queueSpeaking && this.queueRevision === beforeRevision) this.queueRevision = afterRevision;
                 let feedback = data.feedback || this.options.feedback?.(data.nextState, previous);
                 // Short natural variants still describe only the command submitted, never physical completion.
                 if (feedback?.clips?.length === 1 && this.replyIndex++ % 2 && this.options.variant) feedback = this.options.variant(feedback);
-                this.options.log('info', `ได้ยิน “${data.transcript || data.label}” → ${data.label} • ${data.latencyMs} ms`);
+                const timing = Number.isFinite(data.latencyMs) && data.latencyMs >= 0
+                    ? `ประมวลผล ${data.latencyMs} ms · รับส่งและรอคิว ~${Math.max(0, requestMs - data.latencyMs)} ms`
+                    : `รอผลเสียง ${requestMs} ms`;
+                this.options.log('info', `ได้ยิน “${data.transcript || data.label}” → ${data.label} • ${timing} · ตรวจสิทธิ์และส่ง MQTT ${sendMs} ms`);
                 if (!sent.demo) {
                     clearTimeout(this.deviceTimer); this.commandId = sent.id;
                     this.deviceTimer = setTimeout(() => this.deviceResult(sent.id, false, 'ไม่พบสถานะตอบกลับจาก ESP32 กรุณาตรวจอุปกรณ์'), 11000);
                 }
                 this.options.notice(`${sent.demo ? 'จำลอง' : 'รับคำสั่ง'}: ${feedback?.text || data.label}${sent.demo ? ' • ไม่ส่งจริง' : ' • ส่งแล้ว รอสถานะ ESP32'}`, 'info', 6500);
-                await this.say(feedback, epoch); this.rest(epoch);
+                await this.say(feedback, epoch, inputVersion);
+                if (inputVersion === this.inputVersion) this.rest(epoch);
             } catch (error) {
                 if (!this.active(epoch)) { if (this.epoch === epoch) this.stop(); return; }
                 if (inputVersion !== this.inputVersion) return;
                 this.clearWake();
-                if (error.status === 410) { this.fatal(error, epoch); return; }
+                if (error.status === 410) {
+                    if (this.handsFree) await this.reconnectSession(epoch);
+                    else this.fatal(error, epoch);
+                    return;
+                }
                 if (!waitingForName) this.options.notice(error.name === 'AbortError' ? 'โมเดลตอบช้าเกินไป กรุณาลองใหม่' : error.message, 'error', 5500);
                 if (this.handsFree && (!error.status || error.status >= 500)) {
                     const ms = Math.min(30000, 2000 * 2 ** this.failures++);
                     this.setState('RECOVERING', `ลองใหม่ใน ${ms / 1000} วินาที`);
-                    this.listenTimer = setTimeout(() => this.rest(epoch), ms);
+                    this.discardQueuedSpeech(); this.audio.resetInput?.();
+                    this.listenTimer = setTimeout(() => {
+                        if (!this.active(epoch)) return;
+                        this.audio.resetInput?.(); this.listen(epoch);
+                    }, ms);
                 } else this.rest(epoch);
             } finally {
                 clearTimeout(timer); this.controllers.delete(controller);
                 if (this.commandRequest === controller) this.commandRequest = null;
             }
         }
-        async say(feedback, epoch) {
+        async say(feedback, epoch, inputVersion = this.inputVersion) {
             if (!this.active(epoch) || !feedback) return false;
             await this.finishQueuedSpeech(epoch);
-            if (!this.active(epoch)) return false;
+            if (!this.active(epoch) || inputVersion !== this.inputVersion) return false;
             this.setState('SPEAKING');
             try { return (await this.audio.reply(feedback)) !== false; }
             catch (_) {

@@ -18,6 +18,20 @@ test('an overlong utterance is discarded through its end without closing capture
  assert.deepEqual(events,['start','too_long','start','end']);assert.equal(audio.closed,false);
 });
 
+test('a failed wake acknowledgement uses a local tone with capture suppressed', async () => {
+ const audio = new VoiceAudio({});
+ audio.context = { state: 'running' };
+ audio.loadClip = async () => { throw Error('WAV not available'); };
+ audio.beep = async type => {
+  assert.equal(type, 'ready');
+  assert.equal(audio.inputSuppressed, true);
+  return true;
+ };
+ assert.equal(await audio.reply({ clips: ['wake-ready'] }), true);
+ assert.equal(audio.inputSuppressed, false);
+ await assert.rejects(audio.reply({ clips: ['power-off'] }), /WAV not available/);
+});
+
 function fakeAudio({ microphone, detector }) {
  const timers = new Map(), statuses = [], requests = [];
  const browser = {

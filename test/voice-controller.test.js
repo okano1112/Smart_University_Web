@@ -5,7 +5,7 @@ const {wav}=require('../public/js/voice-audio');
 const tick=()=>new Promise(r=>setTimeout(r,0));
 function fixture(options={}){
  const events=[],sent=[],logged=[];let count=0,revision=0,destination='room-a',current={power:true,temp:24,mode:0,fan:3};
- let respond=async form=>({requestId:form.get('requestId'),wakeVerified:true,success:true,nextState:{...current,power:false},label:'ปิดแอร์',feedback:{text:'ปิดแอร์ครับ',clips:['power-off']}});
+ let respond=async form=>({requestId:form.get('requestId'),wakeVerified:true,success:true,nextState:{...current,power:false},label:'ปิดแอร์',latencyMs:42,feedback:{text:'ปิดแอร์ครับ',clips:['power-off']}});
  const audio={start:async()=>{},close:()=>events.push('close'),beep:async()=>events.push('beep'),reply:async f=>events.push(f.clips[0])};
  const c=new Controller({audio:()=>audio,wav,id:()=>`request-${++count}`,device:()=>destination,current:()=>current,revision:()=>revision,
   fetch:async(url,o)=>{if(url.endsWith('/voice-command'))return{ok:true,json:()=>respond(o.body)};return{ok:true,json:async()=>({sessionId:'test-session'})};},
@@ -17,6 +17,7 @@ test('continuous activation waits for name; commands do not add greetings and du
  const h=fixture();await h.c.start(true);assert.equal(h.c.state,'WAIT_CONTINUOUS');assert.equal(h.events.filter(x=>x==='wake-ready'||x==='beep').length,0);
  const a=samples();h.c.onStart(h.c.epoch);await Promise.all([h.c.onEnd(a,h.c.epoch),h.c.onEnd(a,h.c.epoch)]);
  assert.equal(h.sent.length,1);assert.equal(h.c.state,'WAIT_CONTINUOUS');assert.ok(h.events.includes('power-off'));h.c.stop();
+ assert.match(h.logged[0][1], /ประมวลผล 42 ms · รับส่งและรอคิว ~\d+ ms · ตรวจสิทธิ์และส่ง MQTT \d+ ms/);
 });
 test('name greeting finishes before arming; speech echo cannot execute; command consumes claim',async()=>{
  const h=fixture();await h.c.start(true);let release;
@@ -74,8 +75,12 @@ test('push to talk returns off and playback failure does not break continuous mo
  await h.c.start(true);h.audio.reply=async()=>{throw Error('audio failure')};await h.c.onEnd(samples(),h.c.epoch);assert.equal(h.c.state,'WAIT_CONTINUOUS');h.c.stop();
 });
 test('local engine error backs off without publishing',async()=>{
- const h=fixture();await h.c.start(true);h.setRespond(async()=>{throw Error('local down')});await h.c.onEnd(samples(),h.c.epoch);
- assert.equal(h.c.state,'RECOVERING');assert.equal(h.sent.length,0);h.c.stop();
+ const h=fixture();await h.c.start(true);let fail;
+ h.setRespond(()=>new Promise((_, reject)=>{fail=reject;}));
+ const first=h.c.onEnd(samples(),h.c.epoch);await tick();
+ h.c.onStart(h.c.epoch);await h.c.onEnd(samples(),h.c.epoch);
+ fail(Error('local down'));await first;
+ assert.equal(h.c.state,'RECOVERING');assert.equal(h.c.queue.length,0);assert.equal(h.sent.length,0);h.c.stop();
 });
 test('automatic autoplay restriction preserves gesture-required hint',async()=>{
  const h=fixture();h.audio.start=async()=>{throw Object.assign(Error('แตะหน้าจอ'),{code:'VOICE_GESTURE_REQUIRED'})};
@@ -96,6 +101,83 @@ test('startup distinguishes microphone and server model loading and reports a pr
  assert.equal(h.c.state, 'OFF');
 });
 
+test('connects the voice session in parallel with the detector after the mic is granted', async () => {
+ let finishAudio, openCount = 0;
+ const h = fixture({
+  audio: callbacks => ({
+   start() { callbacks.onMicReady(); return new Promise(resolve => { finishAudio = resolve; }); },
+   close() {}
+  }),
+  fetch: async url => {
+   if (url === '/api/voice-session') openCount++;
+   return new Response(JSON.stringify({ sessionId: 'parallel-session' }));
+  }
+ });
+ try {
+  const starting = h.c.start(true);
+  assert.equal(openCount, 1);
+  await tick();
+  assert.equal(h.c.state, 'INIT');
+  finishAudio();
+  assert.equal(await starting, true);
+  assert.equal(h.c.state, 'WAIT_CONTINUOUS');
+  assert.equal(openCount, 1);
+ } finally { h.c.stop(); }
+});
+
+test('a late session response is canceled if the detector fails during parallel startup', async () => {
+ let respond, connectionSignal;
+ const canceled = [];
+ const h = fixture({
+  audio: callbacks => ({
+   async start() { callbacks.onMicReady(); throw Error('detector did not initialize'); },
+   close() {}
+  }),
+  fetch: async (url, options) => {
+   if (url === '/api/voice-session') {
+    connectionSignal = options.signal;
+    return new Promise(resolve => { respond = resolve; });
+   }
+   if (url === '/api/voice-session/cancel') canceled.push(JSON.parse(options.body).sessionId);
+   return Response.json({ success: true });
+  }
+ });
+ assert.equal(await h.c.start(true), false);
+ assert.equal(connectionSignal.aborted, true);
+ respond(Response.json({ sessionId: 'late-session' }));
+ await tick();
+ assert.deepEqual(canceled, ['late-session']);
+ assert.equal(h.c.sessionId, null);
+ assert.equal(h.c.state, 'OFF');
+});
+
+test('an expired voice session renews on the same microphone and only a new utterance can publish', async () => {
+ let sessionCount = 0, commands = 0;
+ const h = fixture({ fetch: async (url, options) => {
+  if (url === '/api/voice-session') return Response.json({ sessionId: `voice-${++sessionCount}` });
+  if (url === '/api/voice-command') {
+   if (++commands === 1) return new Response('<html>Voice session was lost</html>', { status: 410 });
+   assert.equal(options.body.get('sessionId'), 'voice-2');
+   return Response.json({ requestId: options.body.get('requestId'), wakeVerified: true, success: true,
+    nextState: { power: false, temp: 24, mode: 0, fan: 3 }, label: 'ปิดแอร์', feedback: { clips: ['power-off'] } });
+  }
+  return Response.json({ success: true });
+ }});
+ try {
+  await h.c.start(true);
+  const epoch = h.c.epoch;
+  await h.c.onEnd(samples(), epoch);
+  assert.equal(h.c.state, 'WAIT_CONTINUOUS');
+  assert.equal(h.c.epoch, epoch);
+  assert.equal(h.c.sessionId, 'voice-2');
+  assert.equal(h.events.includes('close'), false);
+  assert.equal(h.sent.length, 0);
+  assert.equal(commands, 1);
+  await h.c.onEnd(samples(), epoch);
+  assert.equal(h.sent.length, 1);
+ } finally { h.c.stop(); }
+});
+
 test('a second command captured during inference is processed once after the first reply',async()=>{
  const h=fixture();await h.c.start(true);let release;
  let calls=0;h.setRespond(async form=>{calls++;if(calls===1)await new Promise(r=>release=r);return{requestId:form.get('requestId'),wakeVerified:true,success:true,nextState:{power:true,temp:25,mode:0,fan:3},label:'ตั้ง 25',feedback:{text:'25',clips:['temp-25']}};});
@@ -103,12 +185,13 @@ test('a second command captured during inference is processed once after the fir
  h.c.onStart(h.c.epoch);await h.c.onEnd(samples(),h.c.epoch);
  release();await first;await tick();await tick();assert.equal(h.sent.length,2);assert.equal(calls,2);h.c.stop();
 });
-test('speaking the next sentence delays feedback instead of cutting it off',async()=>{
- const h=fixture();await h.c.start(true);let release;
+test('a verified command publishes while the next sentence is still being captured',async()=>{
+ const h=fixture({send(next) { h.sent.push(next); h.manual(); return {demo:true}; }});await h.c.start(true);let release;
  let calls=0;h.setRespond(async form=>{if(++calls===1)await new Promise(r=>release=r);return{requestId:form.get('requestId'),wakeVerified:true,success:true,nextState:{power:false,temp:24,mode:0,fan:3},feedback:{text:'ปิด',clips:['power-off']}}});
  const first=h.c.onEnd(samples(),h.c.epoch);await tick();h.c.onStart(h.c.epoch);release();await tick();
- assert.equal(h.c.state,'DRAINING');assert.equal(h.sent.length,0);
- await h.c.onEnd(samples(),h.c.epoch);await first;h.c.stop();
+ assert.equal(h.c.state,'DRAINING');assert.equal(h.sent.length,1);assert.equal(h.events.includes('power-off'),false);
+ await h.c.onEnd(samples(),h.c.epoch);await first;await tick();await tick();
+ assert.equal(h.sent.length,2);assert.equal(calls,2);h.c.stop();
 });
 test('temperature follow-up keeps push-to-talk microphone open until the number is spoken',async()=>{
  const h=fixture();await h.c.start(false);

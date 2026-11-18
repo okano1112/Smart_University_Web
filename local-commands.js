@@ -265,4 +265,47 @@ function parseSpeech(input, { expectingTemperature = false } = {}) {
   if(unique.length)return {commands:unique, hasWakeWord:!!wake};
   return result({reason:'unmatched'});
 }
-module.exports={parseSpeech,verifiedWakeTranscript};
+const browserAcTarget = '(?:ac|aircon|air conditioner)';
+const browserPowerEnglish = new RegExp('^(?:(?:open|close|(?:turn|switch|power) (?:on|off)) (?:the )?' +
+  browserAcTarget + '|(?:turn|switch) (?:the )?' + browserAcTarget + ' (?:on|off))$');
+const browserTemp = '(?:2[1-7]|ยี่สิบ(?:เอ็ด|หนึ่ง|สอง|สาม|สี่|ห้า|หก|เจ็ด))';
+const browserTempThai = new RegExp('^(?:(?:ปรับ|ตั้ง|ขอ|เอา)?(?:อุณหภูมิ|แอร์)(?:เป็น|ที่|ไว้ที่)?' +
+  browserTemp + '(?:องศา(?:เซลเซียส)?)?|(?:ปรับ|ตั้ง|ขอ|เอา)?' + browserTemp + 'องศา(?:เซลเซียส)?)$');
+
+function agreedBrowserIntent(transcripts, { waitingForWake, expectingTemperature }) {
+  if (!Array.isArray(transcripts) || transcripts.length !== 2 ||
+      !transcripts.every(text => typeof text === 'string' && text.trim() && text.length <= 500)) return null;
+  const parseLiteral = transcript => {
+    const intent = parseSpeech(transcript, { expectingTemperature });
+    if (intent.reason || (waitingForWake && !intent.hasWakeWord)) return null;
+    if (intent.query || intent.wakeOnly) return intent;
+
+    // The ordinary server parser also recognizes conversational commands. For
+    // browser transcripts, require the entire utterance to be a known phrase.
+    const text = normalize(transcript).replace(/[๐-๙]/g, c => String(c.charCodeAt(0) - 0x0e50));
+    const body = afterLead(text, wakeStart) ?? text;
+    const tha = body.replace(/[\s.,!?]/g, '')
+      .replace(/^(?:กรุณา|รบกวน|ช่วย)/, '')
+      .replace(/(?:ให้ผมหน่อย|ให้เราหน่อย|ให้หนูหน่อย|ให้หน่อย|ให้ผม|หน่อย|นะครับ|นะคะ|ครับผม|ครับ|ค่ะ|คะ)+$/, '');
+    const eng = body.replace(/[.!?]+$/, '').replace(/^please\s+|\s+please$/g, '').replace(/\s+/g, ' ');
+    if (intent.askTemperature) {
+      return /^(?:ปรับ|ตั้ง)อุณหภูมิ$/.test(tha) || /^(?:set|adjust) (?:the )?temperature$/.test(eng) ? intent : null;
+    }
+    if (intent.commands?.length !== 1) return null;
+    const [command] = intent.commands;
+    if (command === 'ON' || command === 'OFF') {
+      return /^(?:เปิด|ปิด)(?:แอร์|เครื่องปรับอากาศ)$/.test(tha) || browserPowerEnglish.test(eng) ? intent : null;
+    }
+    if (!/^TEMP:2[1-7]$/.test(command)) return null;
+    const literalEnglish = /^(?:(?:set|adjust) (?:the )?temperature to )?2[1-7] degrees?(?: celsius)?$/;
+    return browserTempThai.test(tha) || literalEnglish.test(eng) || (!waitingForWake && /^2[1-7]$/.test(tha)) ? intent : null;
+  };
+  const [first, second] = transcripts.map(parseLiteral);
+  if (!first || !second) return null;
+  const agrees = first.hasWakeWord === second.hasWakeWord && first.wakeOnly === second.wakeOnly &&
+    first.askTemperature === second.askTemperature && first.query === second.query &&
+    first.commands?.[0] === second.commands?.[0];
+  return agrees ? { transcript: transcripts[0], intent: first } : null;
+}
+
+module.exports={parseSpeech,verifiedWakeTranscript,agreedBrowserIntent};

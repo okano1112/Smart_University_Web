@@ -51,12 +51,15 @@
             this.epoch++; this.clearTimer(); clearInterval(this.keepAliveTimer); clearTimeout(this.deviceTimer);
             for (const c of this.controllers) c.abort(); this.controllers.clear();
             this.audio?.close(); this.audio = null; this.sessionId = null; this.commandId = null;
+            this.localModel?.close(); this.localModel = null;
             this.discardQueuedSpeech();
             this.clearWake(); this.inputVersion = 0; this.micMuted = false; this.handsFree = false; this.setState('OFF');
             if (session) this.cancelSession(session);
         }
         async connectSession(epoch) {
-            const session = await this.json('/api/voice-session', { device: this.device }, epoch, SESSION_START_TIMEOUT_MS);
+            const session = await this.json('/api/voice-session', {
+                device: this.device, ...(this.localModel ? { browserRecognition: true } : {})
+            }, epoch, SESSION_START_TIMEOUT_MS);
             if (!this.active(epoch)) { this.cancelSession(session.sessionId); return; }
             this.sessionId = session.sessionId; this.engine = session.engine;
         }
@@ -89,6 +92,7 @@
             this.lastStartError = null; this.stop();
             const epoch = this.epoch;
             this.device = this.options.device(); this.handsFree = handsFree; this.failures = 0; this.setState('INIT', 'กำลังเตรียมไมโครโฟน');
+            this.localModel = this.options.localModel?.();
             let connection;
             const beginConnection = () => {
                 if (connection || !this.active(epoch)) return;
@@ -103,7 +107,8 @@
             try {
                 await audio.start({ automatic });
                 if (!this.active(epoch)) { audio.close(); return false; }
-                if (!this.sessionId) this.setState('INIT', 'กำลังโหลดโมเดลเสียงบนเซิร์ฟเวอร์');
+                void this.localModel?.prepare();
+                if (!this.sessionId) this.setState('INIT', this.localModel ? 'กำลังเปิดเซสชันเสียง' : 'กำลังโหลดโมเดลเสียงบนเซิร์ฟเวอร์');
                 beginConnection();
                 await connection;
                 if (!this.active(epoch)) return false;
@@ -248,13 +253,40 @@
             try {
                 this.claimCommand(epoch); await this.claimPromise;
                 if (!this.active(epoch) || inputVersion !== this.inputVersion) return;
-                const form = new FormData();
-                for (const [key, value] of Object.entries(this.body({ requestId, stage: this.handsFree ? token ? 'command' : 'continuous' : 'direct', wakeToken: token || '', currentAc: desired }))) form.append(key, value);
-                form.append('audio', this.options.wav(samples), 'voice.wav');
-                const requestStartedAt = performance.now();
-                const response = await this.options.fetch('/api/voice-command', { method: 'POST', body: form, signal: controller.signal });
-                const data = await response.json().catch(() => null);
-                const requestMs = Math.round(performance.now() - requestStartedAt);
+                const fields = this.body({ requestId, stage: this.handsFree ? token ? 'command' : 'continuous' : 'direct', wakeToken: token || '' });
+                let response, data, browserMs = 0, requestMs;
+                if (this.localModel?.canRecognize(samples)) {
+                    this.setState('PROCESSING_COMMAND', waitingForName ? 'กำลังตรวจคำเรียก Engi บนอุปกรณ์…' : 'กำลังประมวลผลเสียงบนอุปกรณ์…');
+                    const started = performance.now();
+                    const transcripts = await this.localModel.recognize(samples, controller.signal);
+                    browserMs = Math.round(performance.now() - started);
+                    if (!this.active(epoch) || inputVersion !== this.inputVersion) return;
+                    controller.signal.throwIfAborted();
+                    if (transcripts) {
+                        const requestStartedAt = performance.now();
+                        response = await this.options.fetch('/api/voice-transcript', {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: controller.signal,
+                            body: JSON.stringify({ ...fields, currentAc: previous, transcripts })
+                        });
+                        data = await response.json().catch(() => null);
+                        requestMs = Math.round(performance.now() - requestStartedAt);
+                    }
+                }
+                if (!this.active(epoch) || inputVersion !== this.inputVersion) return;
+                controller.signal.throwIfAborted();
+                // Only an explicit decline (or an older server lacking the
+                // route) allows the same audio to go to the fallback. A
+                // successful transcript may already have spent its wake token.
+                if (!response || response.status === 404 || (response.ok && data?.useServer === true)) {
+                    this.setState('PROCESSING_COMMAND', waitingForName ? 'กำลังตรวจคำเรียก Engi บนเซิร์ฟเวอร์…' : 'กำลังประมวลผลเสียงบนเซิร์ฟเวอร์…');
+                    const form = new FormData();
+                    for (const [key, value] of Object.entries({ ...fields, currentAc: desired })) form.append(key, value);
+                    form.append('audio', this.options.wav(samples), 'voice.wav');
+                    const requestStartedAt = performance.now();
+                    response = await this.options.fetch('/api/voice-command', { method: 'POST', body: form, signal: controller.signal });
+                    data = await response.json().catch(() => null);
+                    requestMs = Math.round(performance.now() - requestStartedAt);
+                }
                 if (!this.active(epoch)) { if (this.epoch === epoch) this.stop(); return; }
                 if (inputVersion !== this.inputVersion) return;
                 controller.signal.throwIfAborted();
@@ -263,10 +295,17 @@
                     throw Object.assign(new Error(message), { status: response.status });
                 }
                 if (data.requestId !== requestId) throw new Error('ผลคำสั่งเสียงไม่ตรงกับคำขอ กรุณาพูดใหม่');
+                const browser = data.engine === 'LOCAL_BROWSER';
+                const asrTiming = Number.isFinite(data.latencyMs) && data.latencyMs >= 0
+                    ? `ประมวลผลบนเซิร์ฟเวอร์ ${data.latencyMs} ms · รับส่งและรอคิว ~${Math.max(0, requestMs - data.latencyMs)} ms`
+                    : `รอผลเสียง ${requestMs} ms`;
+                const timing = browser ? `ถอดเสียงบนอุปกรณ์ ${browserMs} ms · ตรวจคำสั่ง ${requestMs} ms`
+                    : browserMs ? `ลองบนอุปกรณ์ ${browserMs} ms · ${asrTiming}` : asrTiming;
                 this.failures = 0;
                 if (token) this.clearWake();
                 const ignored = data.ignored || (waitingForName && data.wakeVerified !== true);
                 if (!ignored && (data.followUp || data.wakeOnly)) {
+                    this.options.log('info', `เอ็นจี้ยืนยันคำเรียก “${data.transcript}” · ${timing}`);
                     await this.openCommandWindow(data, epoch, inputVersion); return;
                 }
                 if (ignored) {
@@ -291,7 +330,7 @@
                         this.options.notice('ยังอ่านคำตอบไม่ได้ กรุณาถามใหม่', 'warning', 5000);
                     } else {
                         this.options.notice(feedback.text, 'info', 6500);
-                        this.options.log('info', `เอ็นจี้ตอบ: ${feedback.text}`);
+                        this.options.log('info', `เอ็นจี้ตอบ: ${feedback.text} · ${timing}`);
                         await this.say(feedback, epoch, inputVersion);
                     }
                     if (inputVersion === this.inputVersion) this.rest(epoch);
@@ -319,9 +358,6 @@
                 let feedback = data.feedback || this.options.feedback?.(data.nextState, previous);
                 // Short natural variants still describe only the command submitted, never physical completion.
                 if (feedback?.clips?.length === 1 && this.replyIndex++ % 2 && this.options.variant) feedback = this.options.variant(feedback);
-                const timing = Number.isFinite(data.latencyMs) && data.latencyMs >= 0
-                    ? `ประมวลผล ${data.latencyMs} ms · รับส่งและรอคิว ~${Math.max(0, requestMs - data.latencyMs)} ms`
-                    : `รอผลเสียง ${requestMs} ms`;
                 this.options.log('info', `ได้ยิน “${data.transcript || data.label}” → ${data.label} • ${timing} · ตรวจสิทธิ์และส่ง MQTT ${sendMs} ms`);
                 if (!sent.demo) {
                     clearTimeout(this.deviceTimer); this.commandId = sent.id;

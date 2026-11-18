@@ -44,6 +44,10 @@ test('offline API: local inference, no external fetch, deduplication and rejecti
     const r = await fetchHttp(base + '/api/voice-command', { method: 'POST', body: form });
     return { status: r.status, ...await r.json() };
   };
+  const transcript = (sessionId, transcripts, options = {}) => json('/api/voice-transcript', {
+    sessionId, device: 'room-a', stage: 'continuous', requestId: `request-${String(++sequence).padStart(16, '0')}`,
+    currentAc: { power: false, temp: 24, mode: 2, fan: 2 }, transcripts, ...options
+  });
   try {
     const session = await json('/api/voice-session', { device: 'room-a' });
     assert.equal(session.engine, 'LOCAL_WHISPER'); assert.equal(session.wakeWord, true);
@@ -159,6 +163,88 @@ test('offline API: local inference, no external fetch, deduplication and rejecti
       prediction={accepted:true,engine:'LOCAL_WHISPER',transcript:'ปรับอุณหภูมิ'};
       const direct=await command(session.sessionId,'direct');
       assert.equal(direct.followUp,'temperature');assert.equal(direct.wakeToken,undefined);assert.equal(direct.wakeVerified,undefined);
+    });
+    await t.test('ready browser can start without Python and transcript/model routes require login', async () => {
+      const offline = localVoice.start;
+      localVoice.start = async () => { throw Object.assign(new Error('Python unavailable'), { status: 503 }); };
+      try {
+        assert.equal((await json('/api/voice-session', { device: 'room-a' })).status, 503);
+        const browser = await json('/api/voice-session', { device: 'room-a', browserRecognition: true });
+        assert.equal(browser.status, 200);
+        assert.equal(browser.engine, 'LOCAL_BROWSER');
+        assert.equal(browser.wakeWord, true);
+        assert.equal((await transcript(browser.sessionId, ['เอ็นจี้', 'เอ็นจี้'])).wakeOnly, true);
+      } finally { localVoice.start = offline; }
+
+      const route = base + '/api/voice-transcript';
+      const body = JSON.stringify({ sessionId: session.sessionId });
+      const headers = { 'Content-Type': 'application/json' };
+      assert.equal((await testFetch(route, { method: 'POST', headers: { ...headers, Origin: base }, body })).status, 401);
+      assert.equal((await testFetch(route, { method: 'POST', headers: { ...headers, Origin: 'https://untrusted.example', Cookie: cookie }, body })).status, 403);
+      assert.equal((await testFetch(base + '/voice-model/typhoon-q4-v1/manifest.json')).status, 401);
+      assert.equal((await fetchHttp(base + '/voice-model/typhoon-q4-v1/unknown.txt')).status, 404);
+    });
+    await t.test('matching literal browser transcripts reuse queries and AC mapping without invoking Python', async () => {
+      const priorCalls = calls;
+      const power = await transcript(session.sessionId, ['เอ็นจี้เปิดแอร์ให้ผมหน่อย', 'เอ็นจี้ เปิดแอร์ครับ']);
+      assert.equal(power.wakeVerified, true);
+      assert.equal(power.engine, 'LOCAL_BROWSER');
+      assert.deepEqual(power.nextState, { power: true, temp: 24, mode: 2, fan: 2 });
+      assert.deepEqual(power.feedback.clips, ['power-on']);
+      const off = await transcript(session.sessionId, ['Hey Engi, turn off the AC.', 'Engi turn the AC off']);
+      assert.equal(off.nextState.power, false);
+      const query = await transcript(session.sessionId, ['เอ็นจี้ ตอนนี้กี่องศา', 'เอ็นจี้ อุณหภูมิห้องเท่าไหร่']);
+      assert.equal(query.query, 'room_temperature');
+      assert.equal(query.nextState, undefined);
+      assert.equal(calls, priorCalls);
+    });
+    await t.test('uncertain or nonliteral browser results yield to PCM without locking the request', async () => {
+      const priorCalls = calls;
+      for (const candidates of [
+        ['เปิดแอร์', 'เปิดแอร์'],
+        ['เอ็นที่เปิดแอร์', 'เอ็นจี้เปิดแอร์'],
+        ['Andy turn on AC', 'Engi turn on AC'],
+        ['เอ็นจี้เปิดแอร์', 'เอ็นจี้ปิดแอร์'],
+        ['เอ็นจี้เปิดแอร์', 'เอ็นจี้ไม่ต้องเปิดแอร์'],
+        ['Engi open the door next to the AC', 'Engi open the door next to the AC'],
+        ['เอ็นจี้เปิดประตูให้แอร์เข้าหน่อย', 'เอ็นจี้เปิดประตูให้แอร์เข้าหน่อย'],
+        ['เอ็นจี้เปิดแอร์แล้วตั้ง 25 องศา', 'เอ็นจี้เปิดแอร์แล้วตั้ง 25 องศา'],
+        ['เอ็นจี้เปิดแอร์'],
+        ['เอ็นจี้เปิดแอร์', null]
+      ]) {
+        const response = await transcript(session.sessionId, candidates);
+        assert.deepEqual(response, { status: 200, useServer: true }, JSON.stringify(candidates));
+      }
+      assert.equal(calls, priorCalls);
+      assert.equal((await transcript(session.sessionId, ['เอ็นจี้', 'เอ็นจี้'], { device: 'room-b' })).status, 410);
+      assert.equal((await transcript(session.sessionId, ['เอ็นจี้', 'เอ็นจี้'], { currentAc: { power: true, temp: 40 } })).status, 400);
+      const requestId = 'request-browser-fallback-1111';
+      const wake = await transcript(session.sessionId, ['เอ็นจี้', 'เอ็นจี้']);
+      assert.ok(wake.wakeToken);
+      const ticket = { sessionId: session.sessionId, device: 'room-a', wakeToken: wake.wakeToken };
+      await json('/api/voice-session/arm', ticket);
+      await json('/api/voice-session/claim', ticket);
+      const declined = await transcript(session.sessionId, ['ยี่สิบห้าองศา', 'ยี่สิบหกองศา'], { stage: 'command', requestId, wakeToken: wake.wakeToken });
+      assert.deepEqual(declined, { status: 200, useServer: true });
+      prediction = wakePrediction('ยี่สิบห้าองศา');
+      const fallback = await command(session.sessionId, 'command', requestId, undefined, wake.wakeToken);
+      assert.equal(fallback.nextState.temp, 25);
+      assert.equal(fallback.engine, 'LOCAL_WHISPER');
+      assert.equal(calls, priorCalls + 1);
+      assert.equal((await transcript(session.sessionId, ['25 องศา', 'ยี่สิบห้าองศา'], { stage: 'command', wakeToken: wake.wakeToken })).status, 409);
+    });
+    await t.test('accepted browser follow-up is one use and repeated request IDs are idempotent', async () => {
+      const wake = await transcript(session.sessionId, ['เฮ้ เอ็นจี้', 'เอ็นจี้ครับ']);
+      const ticket = { sessionId: session.sessionId, device: 'room-a', wakeToken: wake.wakeToken };
+      assert.equal((await transcript(session.sessionId, ['25 องศา', 'ยี่สิบห้าองศา'], { stage: 'command', wakeToken: wake.wakeToken })).status, 409);
+      await json('/api/voice-session/arm', ticket);
+      await json('/api/voice-session/claim', ticket);
+      const options = { stage: 'command', requestId: 'request-browser-consumed-1111', wakeToken: wake.wakeToken };
+      const result = await transcript(session.sessionId, ['25 องศา', 'ยี่สิบห้าองศา'], options);
+      assert.equal(result.nextState.temp, 25);
+      assert.equal(result.engine, 'LOCAL_BROWSER');
+      assert.deepEqual(await transcript(session.sessionId, ['25 องศา', 'ยี่สิบห้าองศา'], options), result);
+      assert.equal((await transcript(session.sessionId, ['25 องศา', 'ยี่สิบห้าองศา'], { ...options, requestId: 'request-browser-replayed-1111' })).status, 409);
     });
     await t.test('unavailable local engine fails visibly, never falls back to cloud', async () => {
       localVoice.classify = async () => { throw Object.assign(new Error('local unavailable'), { status: 503 }); };

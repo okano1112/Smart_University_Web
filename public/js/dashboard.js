@@ -800,6 +800,7 @@ const voiceLabels = {
 const voiceController = new SmartVoiceController({
     fetch: appFetch, id: () => crypto.randomUUID(), canStart: () => sessionAuthorized && !sessionEnded && !sessionSuspended,
     audio: callbacks => new SmartVoiceAudio.VoiceAudio(callbacks), wav: SmartVoiceAudio.wav,
+    localModel: () => new SmartLocalSpeechRecognizer({ onStatus: text => logEvent('info', text) }),
     device: () => JSON.stringify([settings.mqttUrl, settings.command]),
     current: () => ({ ...currentDesired() }), revision: () => state.requestCount, pending: () => !!state.pending,
     send: sendAcCommand, answer: answerRoomQuestion, notice, log: logEvent, feedback: SmartVoiceFeedback.describe, variant: SmartVoiceFeedback.variant,
@@ -810,7 +811,7 @@ const voiceController = new SmartVoiceController({
         const waitingForName = handsFree && !voiceController.wakeToken && !voiceController.followUp
             && ['WAIT_CONTINUOUS', 'CAPTURE_COMMAND', 'PROCESSING_COMMAND', 'DRAINING'].includes(phase);
         const checkingName = waitingForName && ['PROCESSING_COMMAND', 'DRAINING'].includes(phase);
-        const status = waitingForName ? (checkingName ? 'กำลังตรวจคำเรียก Engi…' : voiceLabels.WAIT_CONTINUOUS) : label || voiceLabels[phase]
+        const status = waitingForName ? (checkingName ? label || 'กำลังตรวจคำเรียก Engi…' : voiceLabels.WAIT_CONTINUOUS) : label || voiceLabels[phase]
             || (enabled ? 'กำลังเตรียมกลับมาฟัง' : 'ปิดการรอเรียก Engi');
         const statusElement = $('engi-status');
         if (statusElement && statusElement.textContent !== status) statusElement.textContent = status;

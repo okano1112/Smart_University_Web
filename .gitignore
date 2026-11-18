@@ -11,6 +11,7 @@ __pycache__/
 models/whisper-small/
 models/whisper-medium/
 models/whisper-th-small/
+models/typhoon-q4-v1/
 models/movenet-multipose.tflite
 
 .DS_Store

@@ -17,8 +17,60 @@ test('continuous activation waits for name; commands do not add greetings and du
  const h=fixture();await h.c.start(true);assert.equal(h.c.state,'WAIT_CONTINUOUS');assert.equal(h.events.filter(x=>x==='wake-ready'||x==='beep').length,0);
  const a=samples();h.c.onStart(h.c.epoch);await Promise.all([h.c.onEnd(a,h.c.epoch),h.c.onEnd(a,h.c.epoch)]);
  assert.equal(h.sent.length,1);assert.equal(h.c.state,'WAIT_CONTINUOUS');assert.ok(h.events.includes('power-off'));h.c.stop();
- assert.match(h.logged[0][1], /ประมวลผล 42 ms · รับส่งและรอคิว ~\d+ ms · ตรวจสิทธิ์และส่ง MQTT \d+ ms/);
+ assert.match(h.logged[0][1], /ประมวลผลบนเซิร์ฟเวอร์ 42 ms · รับส่งและรอคิว ~\d+ ms · ตรวจสิทธิ์และส่ง MQTT \d+ ms/);
 });
+for (const accepted of [true, false]) {
+ test(`browser recognition ${accepted ? 'sends only text' : 'falls back with the same original samples'}`, async () => {
+  const audio = samples(), requests = [];
+  const localModel = { ready: true, prepare() {}, close() {}, canRecognize: () => true,
+   recognize(received) { assert.equal(received, audio); return ['เอ็นจี้ปิดแอร์', 'เอ็นจี้ ปิดแอร์']; } };
+  const command = { wakeVerified: true, success: true, nextState: {power:false,temp:24,mode:0,fan:3}, label:'ปิดแอร์' };
+  const h = fixture({ localModel: () => localModel, fetch: async (url, options) => {
+   if (url.endsWith('/voice-transcript')) {
+    const input = JSON.parse(options.body);
+    requests.push([url, input.requestId]);
+    assert.equal(input.stage, 'continuous'); assert.equal(input.transcripts.length, 2);
+    assert.equal(input.currentAc.power, true);
+    return Response.json(accepted ? { ...command, requestId: input.requestId, engine: 'LOCAL_BROWSER' } : {useServer:true});
+   }
+   if (url.endsWith('/voice-command')) {
+    const input = options.body;
+    requests.push([url, input.get('requestId')]);
+    assert.deepEqual(await input.get('audio').arrayBuffer(), await wav(audio).arrayBuffer());
+    return Response.json({ ...command, requestId: input.get('requestId') });
+   }
+   return Response.json({sessionId:'browser-session'});
+  } });
+  try {
+   await h.c.start(true);
+   await h.c.onEnd(audio, h.c.epoch);
+   assert.deepEqual(requests, accepted ? [['/api/voice-transcript', 'request-1']] :
+    [['/api/voice-transcript', 'request-1'], ['/api/voice-command', 'request-1']]);
+   assert.equal(h.sent.length, 1);
+   if (accepted) assert.match(h.logged[0][1], /ถอดเสียงบนอุปกรณ์/);
+  } finally { h.c.stop(); }
+ });
+}
+
+test('stopping during client inference fences late text and fallback', async () => {
+ let complete, noticedRequest = false;
+ const h = fixture({
+  localModel: () => ({prepare() {}, close() {}, canRecognize: () => true,
+   recognize: () => new Promise(resolve => { complete = resolve; }) }),
+  fetch: async url => {
+   if (url.endsWith('/voice-transcript') || url.endsWith('/voice-command')) noticedRequest = true;
+   return Response.json({sessionId:'browser-session'});
+  }
+ });
+ await h.c.start(true);
+ const pending = h.c.onEnd(samples(), h.c.epoch);
+ await tick(); h.c.stop();
+ complete(['เอ็นจี้ปิดแอร์','เอ็นจี้ ปิดแอร์']);
+ await pending;
+ assert.equal(noticedRequest, false);
+ assert.equal(h.sent.length, 0);
+});
+
 test('name greeting finishes before arming; speech echo cannot execute; command consumes claim',async()=>{
  const h=fixture();await h.c.start(true);let release;
  h.audio.reply=()=>new Promise(r=>release=r);
@@ -243,7 +295,9 @@ test('verified room question reports and speaks the latest reading without publi
   current=28.5;h.manual();release();await question;
   assert.deepEqual(queries,['room_temperature']);assert.equal(h.sent.length,0);
   assert.deepEqual(spoken,[{text:'อุณหภูมิห้อง 28.5 องศาครับ',clips:['room-temperature','reading-28.5']}]);
-  assert.ok(h.events.includes(spoken[0].text));assert.deepEqual(h.logged,[['info',`เอ็นจี้ตอบ: ${spoken[0].text}`]]);
+  assert.ok(h.events.includes(spoken[0].text));
+  assert.equal(h.logged.length,1);assert.equal(h.logged[0][0],'info');
+  assert.ok(h.logged[0][1].startsWith(`เอ็นจี้ตอบ: ${spoken[0].text} · รอผลเสียง `));
   assert.equal(h.c.state,'WAIT_CONTINUOUS');
  } finally {h.c.stop();}
 });

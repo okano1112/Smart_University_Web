@@ -9,7 +9,7 @@ const { installRoomLogin } = require('./room-login');
 const { VoiceSessions, VoiceError, validAc } = require('./voice-session');
 const voiceSessions = new VoiceSessions();
 const { LocalVoice, commandFor } = require('./offline-voice');
-const { parseSpeech, verifiedWakeTranscript } = require('./local-commands');
+const { parseSpeech, verifiedWakeTranscript, agreedBrowserIntent } = require('./local-commands');
 const localVoice = new LocalVoice();
 const { describe: describeVoiceCommand } = require('./public/js/voice-feedback');
 const { createCoolingForecastRouter } = require('./cooling-forecast-route');
@@ -64,6 +64,15 @@ serveVoiceAsset('/vad-web/silero_vad.onnx', `${vadDirectory}/silero_vad.onnx`, '
 serveVoiceAsset('/js/voice-audio-worklet.js', 'public/js/voice-audio-worklet.js', 'text/javascript');
 app.use('/vad-web', express.static(path.join(__dirname, vadDirectory)));
 app.use('/ort', express.static(path.join(__dirname, ortDirectory)));
+const browserModelFiles = new Set(['manifest.json', 'encoder.q4.onnx', 'predictor.fp32.onnx', 'joint.fp32.onnx', 'frontend.json', 'tokenizer.json']);
+app.get('/voice-model/typhoon-q4-v1/:file', (req, res) => {
+  if (!browserModelFiles.has(req.params.file)) return res.sendStatus(404);
+  res.sendFile(req.params.file, {
+    root: path.join(__dirname, 'models', 'typhoon-q4-v1'),
+    cacheControl: false,
+    headers: { 'Cache-Control': 'private, max-age=86400, immutable', 'Cloudflare-CDN-Cache-Control': 'no-store' }
+  });
+});
 app.use(express.static(path.join(__dirname, 'public')));
 
 const upload = multer({
@@ -86,9 +95,10 @@ function voiceRoute(handler) {
   };
 }
 app.post('/api/voice-session', voiceRoute(async (req, res) => {
-  await localVoice.start();
+  const browserRecognition = req.body.browserRecognition === true;
+  if (!browserRecognition) await localVoice.start();
   if (res.destroyed) return;
-  return { sessionId: voiceSessions.create(req.body.device), engine: 'LOCAL_WHISPER', wakeWord: true, duration: 12 };
+  return { sessionId: voiceSessions.create(req.body.device), engine: browserRecognition ? 'LOCAL_BROWSER' : 'LOCAL_WHISPER', wakeWord: true, duration: 12 };
 }));
 app.post('/api/voice-session/cancel', voiceRoute(req => {
   voiceSessions.cancel(req.body.sessionId); return { success: true };
@@ -102,64 +112,95 @@ for (const action of ['arm', 'claim']) {
     return voiceSessions[action](session, req.body.wakeToken);
   }));
 }
+function validateVoiceStage(stage) {
+  if (!['continuous', 'command', 'direct'].includes(stage)) throw new VoiceError('สถานะรับเสียงไม่ถูกต้อง');
+}
+function validateVoiceAc(currentAc) {
+  if (!currentAc || !validAc({ ...currentAc, power: currentAc.power === null ? true : currentAc.power })) throw new VoiceError('สถานะอุปกรณ์ไม่ถูกต้อง');
+}
+function expectingVoiceTemperature(session) {
+  return Date.now() < (session.temperatureUntil || 0);
+}
+function voiceIntentResponse({ session, stage, currentAc, result, transcript, intent, latencyMs }) {
+  const engine = result.engine || 'LOCAL_WHISPER';
+  const waitingForWake = stage === 'continuous';
+  if (waitingForWake && !intent?.hasWakeWord) return { success:false, ignored:true, waitingForWake:true, engine, latencyMs };
+  const wakeEvidence = waitingForWake ? { wakeVerified: true } : {};
+  // The browser reads the requested live value after recognition. A query
+  // never constructs an AC state or uses the command mapping fallback.
+  if (intent?.query) {
+    session.temperatureUntil = 0;
+    session.wake = null;
+    return { success: true, query: intent.query, ...wakeEvidence, engine, transcript, latencyMs };
+  }
+  const ticket = () => stage === 'direct' ? {} : { wakeToken: voiceSessions.issueWake(session) };
+  if (intent?.wakeOnly) return { success: false, wakeOnly: true, ...ticket(), ...wakeEvidence, engine, transcript, latencyMs,
+    feedback: { text: 'ครับ พูดได้เลยครับ', clips: ['wake-ready'] } };
+  if (intent?.askTemperature) {
+    session.temperatureUntil = Date.now() + 20000;
+    return { success: false, followUp: 'temperature', ...ticket(), ...wakeEvidence, engine, transcript, latencyMs,
+      message: 'ต้องการกี่องศาครับ', feedback: { text: 'ต้องการกี่องศาครับ', clips: ['ask-temperature'] } };
+  }
+  const parsed = commandFor(intent?.commands ? { accepted: true, commands: intent.commands } : intent ? {} : result, currentAc);
+  if (!parsed) {
+    const tooLong = result.reason === 'too_long';
+    const negated = intent?.reason === 'negated';
+    if (negated) session.temperatureUntil = 0;
+    const message = negated ? 'รับทราบครับ ยังไม่ส่งคำสั่ง' : tooLong ? 'กรุณาพูดคำสั่งให้สั้นลง ไม่เกินสิบสองวินาทีครับ' : transcript ? `ได้ยินว่า “${transcript}” กรุณาระบุคำสั่งอีกครั้ง` : 'ได้ยินเสียงไม่ชัด กรุณาพูดใหม่';
+    return { success: false, ...wakeEvidence, engine, transcript, latencyMs, message,
+      feedback: { text: message, clips: [negated ? 'cancelled' : tooLong ? 'too-long' : 'not-understood'] } };
+  }
+  if (parsed.unsupported) return { success: false, ...wakeEvidence, engine, transcript, latencyMs,
+    message: parsed.message, feedback: parsed.feedback };
+  session.temperatureUntil = 0; session.wake = null;
+  return { success: true, ...wakeEvidence, transcript: transcript || parsed.text, label: `คำสั่งในเครื่อง: ${parsed.text}`,
+    engine, latencyMs, nextState: parsed.next,
+    feedback: describeVoiceCommand(parsed.next, currentAc, parsed.fields) };
+}
 app.post('/api/voice-command', upload.single('audio'), voiceRoute(async req => {
   const session = voiceSessions.get(req.body.sessionId, req.body.device);
   return voiceSessions.run(session, req.body.requestId, async signal => {
     const startTime = Date.now();
-    const stage = req.body.stage;
-    if (!['continuous', 'command', 'direct'].includes(stage)) throw new VoiceError('สถานะรับเสียงไม่ถูกต้อง');
+    const { stage, wakeToken } = req.body;
+    validateVoiceStage(stage);
     const waitingForWake = stage === 'continuous';
-    if (stage === 'command') voiceSessions.consume(session, req.body.wakeToken);
+    if (stage === 'command') voiceSessions.consume(session, wakeToken);
     const audio = req.file?.buffer;
     if (!audio || audio.length < 1644 || audio.toString('ascii', 0, 4) !== 'RIFF' || audio.toString('ascii', 8, 12) !== 'WAVE' || audio.length > 16_000 * 2 * 16 + 44) {
       throw new VoiceError('ไฟล์เสียงไม่ถูกต้องหรือยาวเกินไป กรุณาพูดใหม่');
     }
     let currentAc;
     try { currentAc = JSON.parse(req.body.currentAc); } catch (_) { }
-    if (!currentAc || !validAc({ ...currentAc, power: currentAc.power === null ? true : currentAc.power })) throw new VoiceError('สถานะอุปกรณ์ไม่ถูกต้อง');
+    validateVoiceAc(currentAc);
     const result = await localVoice.classify(audio, signal, { wake: waitingForWake });
     signal.throwIfAborted();
-    const engine = result.engine || 'LOCAL_WHISPER';
     const latencyMs = Date.now() - startTime;
-    // An ordinary transcript (including a prompted or legacy model result) is
-    // never enough to open the hands-free window or trigger a command.
+    // A PCM request still needs acoustic wake evidence from Whisper before
+    // ordinary grammar can produce a command or open a follow-up window.
     const wakeTranscript = waitingForWake ? verifiedWakeTranscript(result) : null;
-    if (waitingForWake && !wakeTranscript) return { success:false, ignored:true, waitingForWake:true, engine, latencyMs };
-    const wakeEvidence = waitingForWake ? { wakeVerified: true } : {};
     const transcript = wakeTranscript || result.transcript || '';
-    const intent = result.engine === 'LOCAL_WHISPER' && result.accepted
-      ? parseSpeech(transcript, { expectingTemperature: Date.now() < (session.temperatureUntil || 0) }) : null;
-    if (waitingForWake && !intent?.hasWakeWord) return { success:false, ignored:true, waitingForWake:true, engine, latencyMs };
-    // The browser reads the requested live value after recognition. A query
-    // never constructs an AC state or uses the command mapping fallback.
-    if (intent?.query) {
-      session.temperatureUntil = 0;
-      session.wake = null;
-      return { success: true, query: intent.query, ...wakeEvidence, engine, transcript, latencyMs };
-    }
-    const ticket = () => stage === 'direct' ? {} : { wakeToken: voiceSessions.issueWake(session) };
-    if (intent?.wakeOnly) return { success: false, wakeOnly: true, ...ticket(), ...wakeEvidence, engine, transcript, latencyMs,
-      feedback: { text: 'ครับ พูดได้เลยครับ', clips: ['wake-ready'] } };
-    if (intent?.askTemperature) {
-      session.temperatureUntil = Date.now() + 20000;
-      return { success: false, followUp: 'temperature', ...ticket(), ...wakeEvidence, engine, transcript, latencyMs,
-        message: 'ต้องการกี่องศาครับ', feedback: { text: 'ต้องการกี่องศาครับ', clips: ['ask-temperature'] } };
-    }
-    const parsed = commandFor(intent?.commands ? { accepted: true, commands: intent.commands } : intent ? {} : result, currentAc);
-    if (!parsed) {
-      const tooLong = result.reason === 'too_long';
-      const negated = intent?.reason === 'negated';
-      if (negated) session.temperatureUntil = 0;
-      const message = negated ? 'รับทราบครับ ยังไม่ส่งคำสั่ง' : tooLong ? 'กรุณาพูดคำสั่งให้สั้นลง ไม่เกินสิบสองวินาทีครับ' : transcript ? `ได้ยินว่า “${transcript}” กรุณาระบุคำสั่งอีกครั้ง` : 'ได้ยินเสียงไม่ชัด กรุณาพูดใหม่';
-      return { success: false, ...wakeEvidence, engine, transcript, latencyMs, message,
-        feedback: { text: message, clips: [negated ? 'cancelled' : tooLong ? 'too-long' : 'not-understood'] } };
-    }
-    if (parsed.unsupported) return { success: false, ...wakeEvidence, engine, transcript, latencyMs,
-      message: parsed.message, feedback: parsed.feedback };
-    session.temperatureUntil = 0; session.wake = null;
-    return { success: true, ...wakeEvidence, transcript: transcript || parsed.text, label: `คำสั่งในเครื่อง: ${parsed.text}`,
-      engine, latencyMs, nextState: parsed.next,
-      feedback: describeVoiceCommand(parsed.next, currentAc, parsed.fields) };
+    const intent = (!waitingForWake || wakeTranscript) && result.engine === 'LOCAL_WHISPER' && result.accepted
+      ? parseSpeech(transcript, { expectingTemperature: expectingVoiceTemperature(session) }) : null;
+    return voiceIntentResponse({ session, stage, currentAc, result, transcript, intent, latencyMs });
+  });
+}));
+app.post('/api/voice-transcript', voiceRoute(req => {
+  const startTime = Date.now();
+  const { sessionId, device, requestId, stage, wakeToken, currentAc, transcripts } = req.body;
+  const session = voiceSessions.get(sessionId, device);
+  validateVoiceStage(stage);
+  validateVoiceAc(currentAc);
+  const recognition = agreedBrowserIntent(transcripts, {
+    waitingForWake: stage === 'continuous',
+    expectingTemperature: expectingVoiceTemperature(session)
+  });
+  // Decline before allocating a job or consuming the ticket. The browser can
+  // submit the original audio with the same request ID and wake token.
+  if (!recognition) return { useServer: true };
+  return voiceSessions.run(session, requestId, () => {
+    if (stage === 'command') voiceSessions.consume(session, wakeToken);
+    return voiceIntentResponse({ session, stage, currentAc, result: { engine: 'LOCAL_BROWSER' },
+      ...recognition, latencyMs: Date.now() - startTime });
   });
 }));
 app.use((error, req, res, next) => {

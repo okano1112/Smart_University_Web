@@ -195,6 +195,10 @@ process.exit(matching && assets.every(name => fs.statSync('node_modules/' + name
     $modelCheck = 'import sys; sys.path.insert(0, ''offline-voice''); from asr_worker import Recognizer; Recognizer(); print(''Engi model ready'')'
     Invoke-RequiredCommand $python @('-c', $modelCheck) 'Load Whisper model (check the Python error above if this fails)'
 
+    $step = 'Engi browser model'
+    & $python '.\scripts\download-browser-asr.py'
+    if ($LASTEXITCODE -ne 0) { Write-Warning 'Browser model could not be installed. Engi will continue using the local Whisper model.' }
+
     $step = 'BimClub login'
     # Keep Thai characters in Windows paths intact across the PowerShell 5.1 console code page.
     $configCode = 'require(''dotenv'').config({quiet:true}); const config = { account: require(''node:path'').resolve(process.env.BIMCLUB_LOGIN_ACCOUNT_FILE || ''data/login-account.json''), port:process.env.PORT || ''3000'' }; process.stdout.write(Buffer.from(JSON.stringify(config)).toString(''base64''))'

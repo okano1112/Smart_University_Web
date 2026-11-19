@@ -6,12 +6,12 @@ const { readFile } = require('node:fs/promises');
 const path = require('node:path');
 const { promisify } = require('node:util');
 const derive = promisify(scrypt);
+const { createAuthStore } = require('./auth-store');
 
 const ACCOUNT_FILE = path.join(__dirname, 'data', 'login-account.json');
 const LOGIN_DIR = path.join(__dirname, 'login');
 const SESSION_MS = 12 * 60 * 60 * 1000;
 const RATE_MS = 5 * 60 * 1000;
-const SESSION_LIMIT = 128;
 const MAX_FAILED = 10;
 const MIN_PASSWORD_LENGTH = 8;
 const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
@@ -36,15 +36,6 @@ async function makeLoginAccount(username, password) {
     const salt = randomBytes(16);
     const hash = await passwordHash(password, salt);
     return { version: 1, username, salt: salt.toString('hex'), hash: hash.toString('hex') };
-}
-
-async function readLoginAccount(filename) {
-    try {
-        const data = JSON.parse(await readFile(filename, 'utf8'));
-        if (data?.version === 1 && validUsername(data.username) && typeof data.salt === 'string' &&
-            /^[a-f0-9]{32}$/.test(data.salt) && typeof data.hash === 'string' && /^[a-f0-9]{64}$/.test(data.hash)) return data;
-    } catch (_) { /* Login stays closed when the local account file is absent or unreadable. */ }
-    return null;
 }
 
 function scope(req) {
@@ -76,30 +67,29 @@ function sessionKey(req, name) {
     return /^[A-Za-z0-9_-]{43}$/.test(token) ? createHash('sha256').update(token).digest('hex') : null;
 }
 
-function installRoomLogin(app, { accountFile = ACCOUNT_FILE, now = Date.now } = {}) {
-    const sessions = new Map();
-    let accountHash = null, activeChecks = 0;
+function installRoomLogin(app, { accountFile, now = Date.now,
+    store = createAuthStore({ accountFile, mode: process.env.BIMCLUB_AUTH_MODE || (accountFile ? 'file' : 'fixed') }) } = {}) {
+    let activeChecks = 0;
     const attempts = new Map();
     const sessionOptions = secure => ({ httpOnly: true, secure, sameSite: 'lax', path: '/' });
     const form = express.urlencoded({ extended: false, limit: '4kb', parameterLimit: 3 });
     const expire = () => {
-        for (const [id, session] of sessions) if (now() >= session.expiresAt) sessions.delete(id);
         for (const [peer, limit] of attempts) if (now() >= limit.until) attempts.delete(peer);
     };
-    const lookup = req => {
+    const lookup = async req => {
         const host = scope(req);
         const key = host && sessionKey(req, host.cookie);
-        const session = key && sessions.get(key);
-        return session && session.origin === host.origin && now() < session.expiresAt ? key : null;
+        return key ? store.findSession(key, host.origin, now()) : null;
     };
-    const load = async () => {
-        const account = await readLoginAccount(accountFile);
-        const hash = account?.hash ?? null;
-        if (accountHash !== hash) {
-            accountHash = hash;
-            sessions.clear();
+    const load = () => store.getAccount();
+    const withStore = handler => async (req, res, next) => {
+        try { return await handler(req, res, next); }
+        catch (error) {
+            if (error.code === 'AUTH_DATABASE_UNAVAILABLE') {
+                return res.status(503).type('text').send(error.message);
+            }
+            return next(error);
         }
-        return account;
     };
     const page = async (res, status = 200, message = '') => {
         const template = await readFile(path.join(LOGIN_DIR, 'login.html'), 'utf8');
@@ -121,17 +111,17 @@ function installRoomLogin(app, { accountFile = ACCOUNT_FILE, now = Date.now } = 
         next();
     });
     app.get('/login.css', (_req, res) => res.sendFile(path.join(LOGIN_DIR, 'login.css'), { cacheControl: false }));
-    app.get('/login', async (req, res) => {
-        if (lookup(req)) return res.redirect(303, '/');
+    app.get('/login', withStore(async (req, res) => {
+        if (await lookup(req)) return res.redirect(303, '/');
         if (!await load()) return page(res, 503, setup);
         return page(res);
-    });
+    }));
     app.post('/login', (req, res, next) => {
         const host = scope(req);
         if (!host || !sameOrigin(req, host.origin)) return res.sendStatus(403);
         if (!req.is('application/x-www-form-urlencoded')) return res.sendStatus(415);
         next();
-    }, form, async (req, res) => {
+    }, form, withStore(async (req, res) => {
         expire();
         const peer = req.socket.remoteAddress;
         let limit = attempts.get(peer);
@@ -154,22 +144,23 @@ function installRoomLogin(app, { accountFile = ACCOUNT_FILE, now = Date.now } = 
             if (!account) return page(res, 503, setup);
             if (!validUsername(username) || !validPassword(password)) return page(res, 401, wrong);
             const actual = await passwordHash(password, Buffer.from(account.salt, 'hex'));
-            if (!timingSafeEqual(actual, Buffer.from(account.hash, 'hex')) || username !== account.username || accountHash !== account.hash) {
+            if (!timingSafeEqual(actual, Buffer.from(account.hash, 'hex')) || username !== account.username) {
                 return page(res, 401, wrong);
             }
             const host = scope(req);
             const previous = sessionKey(req, host.cookie);
-            if (previous) sessions.delete(previous);
-            if (sessions.size >= SESSION_LIMIT) sessions.delete(sessions.keys().next().value);
+            if (previous) await store.deleteSession(previous);
             const token = randomBytes(32).toString('base64url');
-            sessions.set(createHash('sha256').update(token).digest('hex'), { origin: host.origin, expiresAt: now() + SESSION_MS });
+            const saved = await store.createSession(createHash('sha256').update(token).digest('hex'),
+                { origin: host.origin, expiresAt: now() + SESSION_MS }, account.hash, now());
+            if (!saved) return page(res, 401, wrong);
             attempts.delete(peer);
             res.cookie(host.cookie, token, { ...sessionOptions(host.secure), maxAge: SESSION_MS });
             return res.redirect(303, '/');
         } finally { activeChecks--; }
-    });
-    app.use((req, res, next) => {
-        const key = lookup(req);
+    }));
+    app.use(withStore(async (req, res, next) => {
+        const key = await lookup(req);
         if (!key) {
             if (['GET', 'HEAD'].includes(req.method) && (req.path === '/' || req.path === '/index.html' ||
                 (req.get('Sec-Fetch-Mode') === 'navigate' && !/^\/api(?:\/|$)/i.test(req.path)))) return res.redirect(303, '/login');
@@ -179,14 +170,15 @@ function installRoomLogin(app, { accountFile = ACCOUNT_FILE, now = Date.now } = 
         if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && !sameOrigin(req, host.origin)) return res.sendStatus(403);
         res.locals.loginSession = key;
         return next();
-    });
+    }));
     app.get('/api/auth/session', (_req, res) => res.sendStatus(204));
-    app.post('/logout', (req, res) => {
+    app.post('/logout', withStore(async (req, res) => {
         const host = scope(req);
-        sessions.delete(res.locals.loginSession);
+        await store.deleteSession(res.locals.loginSession);
         res.clearCookie(host.cookie, sessionOptions(host.secure));
         return res.redirect(303, '/login');
-    });
+    }));
+    return store;
 }
 
 module.exports = { ACCOUNT_FILE, MIN_PASSWORD_LENGTH, makeLoginAccount, installRoomLogin };

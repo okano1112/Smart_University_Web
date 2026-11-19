@@ -201,16 +201,12 @@ process.exit(matching && assets.every(name => fs.statSync('node_modules/' + name
 
     $step = 'BimClub login'
     # Keep Thai characters in Windows paths intact across the PowerShell 5.1 console code page.
-    $configCode = 'require(''dotenv'').config({quiet:true}); const config = { account: require(''node:path'').resolve(process.env.BIMCLUB_LOGIN_ACCOUNT_FILE || ''data/login-account.json''), port:process.env.PORT || ''3000'' }; process.stdout.write(Buffer.from(JSON.stringify(config)).toString(''base64''))'
+    $configCode = 'require(''dotenv'').config({path:''database.env'',quiet:true}); require(''dotenv'').config({quiet:true}); const config = { port:process.env.PORT || ''3000'' }; process.stdout.write(Buffer.from(JSON.stringify(config)).toString(''base64''))'
     $configText = & $node -e $configCode
     if ($LASTEXITCODE -ne 0) { throw 'Could not read the server settings.' }
     $config = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($configText)) | ConvertFrom-Json
-    if (Test-Path -LiteralPath $config.account -PathType Leaf) { Write-Host '[skip] A BimClub login already exists.' }
-    else {
-        Write-Host '[setup] Create the first BimClub login. The password is typed in the terminal.'
-        $env:BIMCLUB_LOGIN_ACCOUNT_FILE = $config.account
-        Invoke-RequiredCommand $npm @('run', 'auth:setup') 'Create BimClub login'
-    }
+    Invoke-RequiredCommand $node @('.\scripts\check-login.js') 'Verify the configured BimClub login'
+    Write-Host '[ready] BimClub login is available. Use the account supplied with the project.'
 
     if (!$SetupOnly) {
         $step = 'Start BimClub'

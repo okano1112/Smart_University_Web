@@ -1,0 +1,51 @@
+name: bimclub
+
+services:
+  web:
+    image: bimclub-web:local
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:1880:1881"
+    environment:
+      TZ: Asia/Bangkok
+      NODE_RED_PORT: "1880"
+      BIMCLUB_AUTH_MODE: fixed
+    env_file:
+      - path: database.env
+        required: false
+    volumes:
+      - web_data:/app/data
+      - ./seed/web:/seed/web:ro
+    tmpfs:
+      - /tmp:size=64m
+
+  node-red:
+    image: bimclub-node-red:local
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: node-red/Dockerfile
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    network_mode: service:web
+    depends_on:
+      web:
+        condition: service_started
+    environment:
+      TZ: Asia/Bangkok
+      NODE_RED_PORT: "1880"
+    volumes:
+      - node_red_data:/data
+      - ./seed/node-red:/seed/node-red:ro
+
+volumes:
+  web_data:
+  node_red_data:

@@ -1,3 +1,4 @@
+require('dotenv').config({ path: require('node:path').join(__dirname, 'database.env'), quiet: true });
 require('dotenv').config();
 const express = require('express');
 const multer = require('multer');
@@ -6,6 +7,7 @@ const { readFile } = require('node:fs/promises');
 const { promisify } = require('node:util');
 const gzip = promisify(require('node:zlib').gzip);
 const { installRoomLogin } = require('./room-login');
+const { createAuthStore } = require('./auth-store');
 const { VoiceSessions, VoiceError, validAc } = require('./voice-session');
 const voiceSessions = new VoiceSessions();
 const { LocalVoice, commandFor } = require('./offline-voice');
@@ -26,7 +28,7 @@ const acScheduler = new AcScheduler({
 });
 
 const app = express();
-installRoomLogin(app, { accountFile: process.env.BIMCLUB_LOGIN_ACCOUNT_FILE });
+const authStore = installRoomLogin(app, { store: createAuthStore({ accountFile: process.env.BIMCLUB_LOGIN_ACCOUNT_FILE }) });
 app.use(express.json({ limit: '100kb' }));
 app.use('/api/cooling-forecast', createCoolingForecastRouter());
 app.use('/api/schedules', createScheduleRouter({ scheduler: acScheduler }));
@@ -220,11 +222,12 @@ if (require.main === module) app.listen(PORT, '127.0.0.1', () => {
   console.log('โมเดลคำสั่งเสียง: models/whisper-th-small (CPU INT8)');
   console.log('================================================================');
 });
-module.exports = { app, voiceSessions, localVoice, acScheduler, scheduleMqtt };
+module.exports = { app, voiceSessions, localVoice, acScheduler, scheduleMqtt, authStore };
 
 if (require.main === module) {
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, async () => {
     localVoice.close();
+    await authStore.close();
     await acScheduler.close(); await scheduleMqtt.close();
     process.exit(0);
   });

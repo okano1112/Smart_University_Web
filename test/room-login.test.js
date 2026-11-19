@@ -14,6 +14,7 @@ test('login closes application routes and checks credentials, origin, expiry and
     const directory = await mkdtemp(path.join(tmpdir(), 'bimclub-login-'));
     const accountFile = path.join(directory, 'login.json');
     process.env.BIMCLUB_LOGIN_ACCOUNT_FILE = accountFile;
+    process.env.BIMCLUB_AUTH_MODE = 'file';
     const { app } = require('../server');
     let now = Date.now();
     const timedApp = express();

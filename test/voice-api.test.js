@@ -10,6 +10,7 @@ const { wav } = require('../public/js/voice-audio');
 const { makeLoginAccount } = require('../room-login');
 const loginDirectory = mkdtempSync(path.join(tmpdir(), 'bimclub-voice-login-'));
 process.env.BIMCLUB_LOGIN_ACCOUNT_FILE = path.join(loginDirectory, 'account.json');
+process.env.BIMCLUB_AUTH_MODE = 'file';
 const { app, voiceSessions, localVoice } = require('../server');
 const { commandFor } = require('../offline-voice');
 

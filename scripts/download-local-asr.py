@@ -12,7 +12,7 @@ snapshot_download('Thaweewat/whisper-th-small-ct2',local_dir=target,
 snapshot_download('Systran/faster-whisper-small',local_dir=target,allow_patterns=['tokenizer.json'])
 manifest={'source':'Thaweewat/whisper-th-small-ct2','base_model':'biodatlab/whisper-th-small-combined',
           'tokenizer_source':'Systran/faster-whisper-small','files':{}}
-for name in ['model.bin','config.json','vocabulary.txt','tokenizer.json']:
+for name in ['model.bin','config.json','vocabulary.txt','vocabulary.json','tokenizer.json']:
     p=target/name
     if p.exists():manifest['files'][name]=hashlib.sha256(p.read_bytes()).hexdigest()
 (target/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')

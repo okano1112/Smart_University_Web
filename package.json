@@ -6,6 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "auth:setup": "node scripts/setup-login.js",
+    "auth:check": "node scripts/check-login.js",
+    "db:check": "node scripts/check-login.js --require-database",
     "node-red:build": "node node-red/build-flow.js",
     "node-red:start": "node scripts/start-cira-node-red.js",
     "test": "node --test test/*.test.js"
@@ -21,6 +23,7 @@
     "express": "^5.3.0",
     "mqtt": "^5.16.1",
     "multer": "^2.5.0",
-    "onnxruntime-web": "^1.14.0"
+    "onnxruntime-web": "^1.14.0",
+    "pg": "8.23.1"
   }
 }

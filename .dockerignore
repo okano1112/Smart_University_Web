@@ -5,6 +5,7 @@
 .env.*
 database.env.example
 database.env
+camera.env
 **/.DS_Store
 **/__pycache__
 **/*.pyc

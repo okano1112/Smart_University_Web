@@ -26,6 +26,7 @@
   <script defer src="/js/voice-handsfree.js"></script>
   <script defer src="/js/ac-schedules.js"></script>
   <script defer src="/js/ac-occupancy.js"></script>
+  <script defer src="/js/room-camera.js"></script>
   <script defer src="/js/dashboard.js"></script>
 </head>
 <body>
@@ -186,6 +187,14 @@
           <p id="forecast-detail" class="text-muted">รอข้อมูลล่าสุด</p><p id="forecast-range" class="text-muted"></p>
           <details class="advanced-settings"><summary>การคำนวณเวลา</summary><p>ใช้แนวโน้มจากเซนเซอร์เมื่อมีข้อมูลเพียงพอ ระหว่างรอใช้ความเร็วการลดอุณหภูมิเบื้องต้น</p><label class="inline-field" for="forecast-rate">อัตราเบื้องต้น<input id="forecast-rate" type="number" min="0.02" max="0.5" step="0.01" value="0.10" aria-describedby="forecast-rate-help" onchange="changeForecastRate()">°C / นาที</label><p id="forecast-rate-help" class="text-muted">เป็นเวลาประมาณ ซึ่งเปลี่ยนตามสภาพห้อง จำนวนคน และกำลังแอร์ การเปลี่ยนค่านี้ไม่สั่งแอร์</p></details>
         </div>
+      </section>
+      <section class="panel camera-panel" aria-labelledby="camera-title">
+        <div class="section-heading">
+          <h2 id="camera-title">กล้องห้องประชุม</h2>
+          <button id="camera-toggle" class="btn btn-secondary" type="button" aria-controls="camera-video" aria-expanded="false">เปิดภาพสด</button>
+        </div>
+        <p id="camera-status" class="text-muted" role="status" hidden></p>
+        <video id="camera-video" controls muted playsinline preload="none" aria-label="ภาพสดจากกล้องห้องประชุม" hidden></video>
       </section>
       <details class="event-panel" id="cira-logs">
         <summary>ประวัติการทำงาน (Logs)</summary>

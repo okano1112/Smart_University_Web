@@ -606,7 +606,7 @@ p+p {
   font-size:12px;
   margin-top:10px!important
 }
-.schedule-panel,.chart-panel {
+.schedule-panel,.chart-panel,.camera-panel {
   margin-top:24px
 }
 .scheduler-status {
@@ -811,6 +811,19 @@ p+p {
 .forecast-readings .arrival-reading:last-child dd {
   font-size:18px;
   padding-top:4px
+}
+.camera-panel #camera-status {
+  margin:0 0 12px;
+  font-size:14px
+}
+.camera-panel video {
+  display:block;
+  width:100%;
+  max-height:65vh;
+  aspect-ratio:16 / 9;
+  object-fit:contain;
+  border-radius:8px;
+  background:#171717
 }
 .dht22-chart-status {
   display:inline-block;
@@ -1285,7 +1298,7 @@ p+p {
   .voice-help {
     font-size:12px
   }
-  .schedule-panel,.chart-panel {
+  .schedule-panel,.chart-panel,.camera-panel {
     margin-top:18px
   }
   .schedule-panel>.section-heading .btn {

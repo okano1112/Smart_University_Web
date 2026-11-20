@@ -26,7 +26,8 @@ def docker(*arguments, capture=False):
 
 
 def portable_compose():
-    config = json.loads(docker("compose", "config", "--no-interpolate", "--no-env-resolution", "--format", "json", capture=True))
+    config = json.loads(docker("compose", "--profile", "camera", "config", "--no-interpolate",
+                               "--no-env-resolution", "--format", "json", capture=True))
     for service in config["services"].values():
         service.pop("build", None)
         for env_file in service.get("env_file", []):
@@ -66,7 +67,7 @@ def main():
         for name in (
             "Start-BimClub.ps1", "Start-BimClub.cmd", "DOCKER.md", "LOGIN.md", "DATABASE.md", "database.env.example",
             "CIRA_ACTIVITY.md", "AC_SCHEDULES.md", "node-red/README.md", "node-red/DHT22.md",
-            "node_red_dht22_environment_flow.json",
+            "node_red_dht22_environment_flow.json", "CAMERA.md", "camera.env.example", "camera/mediamtx.yml",
         ):
             (bundle / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / name, bundle / name)

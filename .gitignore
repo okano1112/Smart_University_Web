@@ -23,3 +23,4 @@ node_modules/
 dist/
 seed/
 database.env
+/camera.env

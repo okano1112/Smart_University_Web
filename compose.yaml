@@ -46,6 +46,21 @@ services:
       - node_red_data:/data
       - ./seed/node-red:/seed/node-red:ro
 
+  camera:
+    image: bluenviron/mediamtx:1.21.4
+    platform: linux/amd64
+    profiles: [camera]
+    restart: unless-stopped
+    network_mode: service:web
+    depends_on:
+      web:
+        condition: service_started
+    env_file:
+      - path: camera.env
+        required: false
+    volumes:
+      - ./camera/mediamtx.yml:/mediamtx.yml:ro
+
 volumes:
   web_data:
   node_red_data:

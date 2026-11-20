@@ -16,6 +16,7 @@ const localVoice = new LocalVoice();
 const { describe: describeVoiceCommand } = require('./public/js/voice-feedback');
 const { createCoolingForecastRouter } = require('./cooling-forecast-route');
 const { createComfortHandler } = require('./comfort-route');
+const { createCameraRouter } = require('./camera-route');
 const { AcScheduler } = require('./ac-scheduler');
 const { SchedulerMqtt } = require('./ac-scheduler-mqtt');
 const { createScheduleRouter } = require('./ac-scheduler-route');
@@ -39,6 +40,7 @@ const acOccupancy = new AcOccupancy({
 
 const app = express();
 const authStore = installRoomLogin(app, { store: createAuthStore({ accountFile: process.env.BIMCLUB_LOGIN_ACCOUNT_FILE }) });
+app.use('/camera/classroom', createCameraRouter());
 app.use(express.json({ limit: '100kb' }));
 app.use('/api/cooling-forecast', createCoolingForecastRouter());
 app.use('/api/schedules', createScheduleRouter({ scheduler: acScheduler }));
@@ -50,6 +52,7 @@ app.post('/api/comfort/recommendation', createComfortHandler());
 
 // Serve the same installed MQTT.js bundle to browsers without a third-party CDN.
 app.get('/vendor/mqtt.min.js', (req, res) => res.sendFile(path.join(path.dirname(require.resolve('mqtt/package.json')), 'dist', 'mqtt.min.js')));
+app.get('/vendor/hls.min.js', (_req, res) => res.sendFile(path.join(path.dirname(require.resolve('hls.js')), 'hls.min.js')));
 
 const vadDirectory = 'node_modules/@ricky0123/vad-web/dist';
 const ortDirectory = 'node_modules/onnxruntime-web/dist';

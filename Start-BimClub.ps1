@@ -31,6 +31,7 @@ try {
         $files = @{
             'data\login-account.json' = 'seed\web\login-account.json'
             'data\ac-schedules.json' = 'seed\web\ac-schedules.json'
+            'data\ac-occupancy.json' = 'seed\web\ac-occupancy.json'
             'node-red\runtime\flows.json' = 'seed\node-red\flows.json'
             'node-red\runtime\flows_cred.json' = 'seed\node-red\flows_cred.json'
             'node-red\runtime\.config.runtime.json' = 'seed\node-red\.config.runtime.json'

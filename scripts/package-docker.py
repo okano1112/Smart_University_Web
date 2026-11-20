@@ -13,6 +13,7 @@ IMAGES = {"web": "bimclub-web:local", "node-red": "bimclub-node-red:local"}
 SEED_FILES = {
     "data/login-account.json": "seed/web/login-account.json",
     "data/ac-schedules.json": "seed/web/ac-schedules.json",
+    "data/ac-occupancy.json": "seed/web/ac-occupancy.json",
     "node-red/runtime/flows.json": "seed/node-red/flows.json",
     "node-red/runtime/flows_cred.json": "seed/node-red/flows_cred.json",
     "node-red/runtime/.config.runtime.json": "seed/node-red/.config.runtime.json",
@@ -41,7 +42,7 @@ def portable_compose():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-build", action="store_true", help="Export images already built and tested")
-    parser.add_argument("--include-data", action="store_true", help="Include this machine's private login, schedules and saved flow")
+    parser.add_argument("--include-data", action="store_true", help="Include this machine's private login, AC settings and saved Node-RED flow")
     parser.add_argument("--output", type=Path, default=ROOT / "dist/bimclub-docker-ready-login-windows-amd64.zip")
     args = parser.parse_args()
     output = args.output.resolve()
@@ -62,7 +63,11 @@ def main():
             print(f"Saving {service} image", flush=True)
             docker("image", "save", "--output", str(bundle / f"images/{service}.tar"), image)
         (bundle / "compose.yaml").write_text(json.dumps(portable_compose(), indent=2) + "\n", encoding="utf-8")
-        for name in ["Start-BimClub.ps1", "Start-BimClub.cmd", "DOCKER.md", "LOGIN.md", "DATABASE.md", "database.env.example", "CIRA_ACTIVITY.md", "node-red/README.md"]:
+        for name in (
+            "Start-BimClub.ps1", "Start-BimClub.cmd", "DOCKER.md", "LOGIN.md", "DATABASE.md", "database.env.example",
+            "CIRA_ACTIVITY.md", "AC_SCHEDULES.md", "node-red/README.md", "node-red/DHT22.md",
+            "node_red_dht22_environment_flow.json",
+        ):
             (bundle / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / name, bundle / name)
         if args.include_data:

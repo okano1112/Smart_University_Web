@@ -20,7 +20,7 @@ function createRelay(targetPort, targetHost = '127.0.0.1') {
 
 function importData(directory, seedDirectory) {
     fs.mkdirSync(directory, { recursive: true });
-    for (const name of ['login-account.json', 'ac-schedules.json']) {
+    for (const name of ['login-account.json', 'ac-schedules.json', 'ac-occupancy.json']) {
         const source = path.join(seedDirectory, name);
         const destination = path.join(directory, name);
         if (!fs.existsSync(source) || fs.existsSync(destination)) continue;

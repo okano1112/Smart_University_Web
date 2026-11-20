@@ -5,6 +5,7 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { buildFlow } = require('./build-flow');
+const { buildDht22Flow } = require('./build-dht22-flow');
 
 function publishIfAbsent(file, contents) {
     const temporary = path.join(path.dirname(file), `.bimclub-seed-${randomUUID()}.tmp`);
@@ -23,7 +24,7 @@ function initializeFlow(userDirectory, seedDirectory = '/seed/node-red') {
 
     const seedFlow = path.join(seedDirectory, 'flows.json');
     const hasSeed = fs.existsSync(seedFlow);
-    const contents = hasSeed ? fs.readFileSync(seedFlow) : JSON.stringify(buildFlow(), null, 2) + '\n';
+    const contents = hasSeed ? fs.readFileSync(seedFlow) : JSON.stringify([...buildFlow(), ...buildDht22Flow()], null, 2) + '\n';
     if (hasSeed) {
         // The runtime file keeps the key used for encrypted MQTT credentials.
         for (const name of ['flows_cred.json', '.config.runtime.json']) {

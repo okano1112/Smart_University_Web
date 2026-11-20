@@ -5,6 +5,7 @@ RUN npm install --prefix /usr/src/node-red --omit=dev --no-audit --no-fund node-
     && mkdir -p /data \
     && chown node:node /data /usr/src/node-red
 COPY --chown=node:node node-red/*.js /opt/bimclub/node-red/
+COPY --chown=node:node node_red_dht22_environment_flow.json /opt/bimclub/node-red/imports/
 
 USER node
 WORKDIR /usr/src/node-red

@@ -161,17 +161,32 @@ test('Docker data seeding preserves existing volume files and rejects incomplete
     const directory = await mkdtemp(path.join(tmpdir(), 'bimclub-docker-import-'));
     const data = path.join(directory, 'data');
     const seed = path.join(directory, 'seed');
+    const occupancy = {
+        version: 1,
+        settings: { offWhenEmpty: false, onWhenOccupied: false, emptyDelayMinutes: 10 },
+        destinationFingerprint: null
+    };
+    const occupancySeed = path.join(seed, 'ac-occupancy.json');
+    const readOccupancy = () => JSON.parse(fs.readFileSync(path.join(data, 'ac-occupancy.json'), 'utf8'));
     fs.mkdirSync(seed);
     try {
         fs.writeFileSync(path.join(seed, 'login-account.json'), '{"version":1,"username":"original"}');
+        fs.writeFileSync(occupancySeed, JSON.stringify(occupancy));
         importData(data, seed);
         assert.equal(JSON.parse(fs.readFileSync(path.join(data, 'login-account.json'))).username, 'original');
+        assert.deepEqual(readOccupancy(), occupancy);
         fs.writeFileSync(path.join(seed, 'login-account.json'), '{"version":1,"username":"old-backup"}');
+        fs.writeFileSync(occupancySeed, JSON.stringify({
+            ...occupancy, settings: { ...occupancy.settings, emptyDelayMinutes: 5 }
+        }));
+        importData(data, seed);
+        assert.deepEqual(readOccupancy(), occupancy);
+
         fs.writeFileSync(path.join(seed, 'ac-schedules.json'), '{"items":[]');
         assert.throws(() => importData(data, seed), SyntaxError);
         assert.equal(JSON.parse(fs.readFileSync(path.join(data, 'login-account.json'))).username, 'original');
         assert.equal(fs.existsSync(path.join(data, 'ac-schedules.json')), false);
-        assert.deepEqual(fs.readdirSync(data), ['login-account.json']);
+        assert.deepEqual(fs.readdirSync(data).sort(), ['ac-occupancy.json', 'login-account.json']);
     } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

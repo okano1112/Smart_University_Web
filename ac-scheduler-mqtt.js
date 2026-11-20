@@ -3,7 +3,7 @@
 const { randomUUID } = require('node:crypto');
 
 const DEVICE_STALE_MS = 75_000;
-const DEFAULTS = { brokerUrl: 'mqtt://broker.emqx.io:1883', commandTopic: 'spu/classroom/remote/air', statusTopic: 'spu/classroom/status' };
+const DEFAULTS = { brokerUrl: 'mqtt://broker.emqx.io:1883', commandTopic: 'spu/classroom/remote/air', statusTopic: 'spu/classroom/status', peopleTopic: 'spu/classroom/cira' };
 
 function safeBrokerUrl(value) {
   try { const url = new URL(value); url.username = ''; url.password = ''; url.search = ''; url.hash = ''; return url.toString(); }
@@ -15,8 +15,10 @@ function readConfig(env = process.env) {
   const url = new URL(brokerUrl);
   if (!['mqtt:', 'mqtts:', 'ws:', 'wss:'].includes(url.protocol)) throw new Error('MQTT_URL ต้องเป็น mqtt, mqtts, ws หรือ wss');
   const config = { brokerUrl, commandTopic: env.MQTT_COMMAND_TOPIC || DEFAULTS.commandTopic, statusTopic: env.MQTT_STATUS_TOPIC || DEFAULTS.statusTopic,
+    peopleTopic: env.MQTT_PEOPLE_TOPIC || DEFAULTS.peopleTopic,
     username: env.MQTT_USERNAME, password: env.MQTT_PASSWORD };
   if ([config.commandTopic, config.statusTopic].some(topic => !topic || topic.length > 256 || /[+#\u0000]/.test(topic))) throw new Error('MQTT Topic ของตารางเวลาไม่ถูกต้อง');
+  if (config.peopleTopic.length > 256 || /[+#\u0000]/.test(config.peopleTopic)) throw new Error('MQTT_PEOPLE_TOPIC ไม่ถูกต้อง');
   return config;
 }
 
@@ -33,8 +35,9 @@ function parseReport(raw) {
 }
 
 class SchedulerMqtt {
-  constructor({ config = readConfig(), now = Date.now, connect, publishTimeoutMs = 8000 } = {}) {
+  constructor({ config = readConfig(), now = Date.now, connect, publishTimeoutMs = 8000, onPeople, onPeopleDisconnect } = {}) {
     this.config = config; this.now = now; this.connect = connect; this.publishTimeoutMs = publishTimeoutMs;
+    this.onPeople = onPeople; this.onPeopleDisconnect = onPeopleDisconnect;
     this.client = null; this.connected = false; this.lastStatusAt = 0; this.deviceState = null; this.poll = null;
   }
 
@@ -52,14 +55,21 @@ class SchedulerMqtt {
       reconnectPeriod: 5000, connectTimeout: 10_000, keepalive: 30, queueQoSZero: false, resubscribe: false });
     client.on('connect', () => {
       this.connected = true; this.lastStatusAt = 0; this.deviceState = null;
+      this.onPeopleDisconnect?.();
       client.subscribe(this.config.statusTopic, { qos: 0 }, error => { if (!error && this.client === client) this.requestStatus(); });
+      if (this.onPeople && this.config.peopleTopic) client.subscribe(this.config.peopleTopic, { qos: 0 }, () => {});
     });
-    const disconnected = () => { this.connected = false; this.lastStatusAt = 0; this.deviceState = null; };
+    const disconnected = () => {
+      this.connected = false; this.lastStatusAt = 0; this.deviceState = null;
+      this.onPeopleDisconnect?.();
+    };
     client.on('offline', disconnected); client.on('close', disconnected);
     // MQTT.js emits errors while reconnecting. Do not log URLs or authentication material.
     client.on('error', () => {});
     client.on('message', (topic, raw, packet) => {
-      if (topic !== this.config.statusTopic || packet?.retain || !this.connected) return;
+      if (packet?.retain || !this.connected || this.client !== client) return;
+      if (topic === this.config.peopleTopic) this.onPeople?.(raw);
+      if (topic !== this.config.statusTopic) return;
       const report = parseReport(raw);
       if (!report) return;
       if (report.offline) { this.lastStatusAt = 0; this.deviceState = null; return; }

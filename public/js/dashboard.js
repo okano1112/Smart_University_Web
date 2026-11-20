@@ -20,6 +20,7 @@ const MAX_TEMP = 27;
 const ACK_TIMEOUT_MS = 10000; // display-only timeout: never blocks the next command
 const DEVICE_STALE_MS = 75000;
 const SENSOR_STALE_MS = 30000;
+const DHT22_ENVIRONMENT_TOPIC = 'spu/classroom/environment';
 const COMFORT_SAMPLE_MS = 6_000;
 const MODE_NAMES = ['COOL', 'DRY', 'FAN'];
 const FAN_NAMES = ['AUTO', 'LOW', 'MED', 'HIGH'];
@@ -39,6 +40,7 @@ let settings = { ...DEFAULTS };
 let mqttClient = null;
 let chart = null;
 const temperatureHistory = [];
+const dht22Temperatures = window.SmartDht22Telemetry?.createTracker();
 const targetHistory = [];
 const comfortHistory = [];
 let peopleStableSince = 0;
@@ -48,6 +50,7 @@ try { const saved=Number(localStorage.getItem('smartCoolingRateV1')); if(saved>=
 let noticeTimer = null;
 let reconnectProbeTimer = null;
 let scheduleClient = null;
+let occupancyClient = null;
 let activityClient = null;
 let sessionAuthorized = false, sessionEnded = false, sessionSuspended = false, sessionRevision = 0;
 let sessionProbe = null, mqttRevision = 0, commandQueue = Promise.resolve(), queuedCommands = 0;
@@ -77,6 +80,7 @@ function pauseDashboardSession(permanent = false) {
     if (permanent) {
         handsFreeStartup.destroy();
         scheduleClient?.destroy();
+        occupancyClient?.destroy();
         activityClient?.stop();
     } else handsFreeStartup.pause();
     stopMqtt();
@@ -107,6 +111,8 @@ function refreshDashboardSession() {
             if (!scheduleClient) scheduleClient = SmartAcSchedules.install({ document, fetch: appFetch, notice,
                 connection: () => ({ mqttUrl: settings.mqttUrl, command: settings.command, status: settings.status }), current: currentDesired });
             else scheduleClient.refresh();
+            if (!occupancyClient) occupancyClient = window.SmartAcOccupancy?.install({ document, fetch: appFetch, connection: () => settings });
+            else occupancyClient.refresh();
             if (!activityClient) activityClient = window.CiraActivity?.install({ metrics: comfortMetrics, apply: applyComfort, fetch: appFetch });
             else activityClient.refresh();
             handsFreeStartup.resume();
@@ -212,6 +218,7 @@ function applySettings() {
     connectMqtt();
     handsFreeStartup.resume();
     scheduleClient?.refresh();
+    occupancyClient?.refresh();
     activityClient?.refresh();
     $('settings-panel').classList.add('hidden');
     $('btn-settings').setAttribute('aria-expanded', 'false');
@@ -224,6 +231,7 @@ function resetSettings() {
 }
 function resetTelemetryConnection() {
     state.people = null; state.sensorAt = { temp: 0, humid: 0, people: 0 };
+    dht22Temperatures?.disconnect();
     peopleStableSince = 0; comfortHistory.length = 0;
     window.SmartCiraLogs?.recordBrowser({ stage: 'disconnected', at: Date.now() });
 }
@@ -259,12 +267,18 @@ function connectMqtt() {
         state.verifyState = 'unknown';
         state.lastStatusAt = 0;
         logEvent('info', 'เชื่อมต่อ MQTT Broker สำเร็จ กำลังขอสถานะ ESP32');
-        target.subscribe([settings.status, settings.temp, settings.humid, settings.people], { qos: 0 }, err => {
+        const topics = [settings.status, settings.temp, settings.humid, settings.people];
+        target.subscribe(topics, { qos: 0 }, err => {
             if (mqttClient !== target) return;
             if (err) { notice('Subscribe MQTT ไม่สำเร็จ: ' + err.message, 'error'); logEvent('error', 'Subscribe ไม่สำเร็จ'); return }
             if (reconnectProbeTimer) clearTimeout(reconnectProbeTimer);
             reconnectProbeTimer = setTimeout(() => requestDeviceStatus(false), 750);
         });
+        if (dht22Temperatures && !topics.includes(DHT22_ENVIRONMENT_TOPIC)) {
+            target.subscribe(DHT22_ENVIRONMENT_TOPIC, { qos: 0 }, error => {
+                if (error && mqttClient === target) logEvent('warning', 'ติดตามข้อมูล DHT22 ผ่าน MQTT ไม่ได้');
+            });
+        }
         renderAll();
     });
     target.on('message', (topic, buffer, packet) => {
@@ -348,6 +362,8 @@ function processMessage(topic, raw, retained) {
         state.sensorAt.people = captureAt;
         renderEnvironment();
         if (isFreshSensor('people')) logs?.recordBrowser({ stage: 'displayed', at: receivedAt, count: state.people, captureAt: state.sensorAt.people, topic });
+    } else if (topic === DHT22_ENVIRONMENT_TOPIC && dht22Temperatures?.accept(data, { retained, now: coolingForecast.nowOnServer() })) {
+        renderForecast();
     }
 }
 function pendingMatches(expected, actual) {
@@ -561,6 +577,20 @@ function renderForecast() {
         statusFresh, pending: !!state.pending, assumedRate: assumedCoolingRate }, forecastContext());
     const { duration, clockTime, remainingMinutes } = SmartCoolingForecastClient;
     const now = coolingForecast.nowOnServer(), estimating = prediction.kind === 'estimate';
+    const dht22 = dht22Temperatures?.series(now) ?? { seen: false, A: null, B: null };
+    const sensorCount = Number(Boolean(dht22.A)) + Number(Boolean(dht22.B));
+    const legacyLive = sensorCount === 0 && fresh && Number.isFinite(state.roomTemp);
+    const showLegacy = sensorCount === 0 && (!dht22.seen || legacyLive);
+    let sensorStatus = 'รอข้อมูล DHT22';
+    if (sensorCount === 2) sensorStatus = 'ตรวจพบ DHT22 2 ตัว';
+    else if (sensorCount === 1) sensorStatus = `ตรวจพบ DHT22 1 ตัว (${dht22.A ? 'A' : 'B'})`;
+    else if (legacyLive) sensorStatus = 'ตรวจพบเซนเซอร์ 1 ตัว (ช่องเดิม)';
+    setText('dht22-chart-status', sensorStatus);
+    $('dht22-chart-status').dataset.sensors = String(legacyLive ? 1 : sensorCount);
+    $('legend-dht22-a').hidden = !dht22.A;
+    $('legend-dht22-b').hidden = !dht22.B;
+    $('legend-legacy-temp').hidden = !showLegacy;
+    setText('legend-forecast-label', sensorCount ? 'คาดการณ์จากเซนเซอร์เดิม' : 'คาดการณ์');
     const arrival = estimating ? clockTime(prediction.arrivalAt, now) : '—';
     const remaining = estimating ? duration(remainingMinutes(prediction, now)) : '';
     const awaitingReading = estimating && prediction.arrivalAt <= now;
@@ -577,11 +607,12 @@ function renderForecast() {
     const future = prediction.points;
     // Observations use the browser clock; the server returns canonical times.
     const plotOffset = estimating ? future[0].time - state.sensorAt.temp : coolingForecast.clockOffset;
-    const past = temperatureHistory.map(p => ({ x: p.time + plotOffset, y: p.temp }));
+    const past = showLegacy ? temperatureHistory.map(p => ({ x: p.time + plotOffset, y: p.temp })) : [];
     const latestAt = state.sensorAt.temp + plotOffset;
-    if (fresh && (!past.length || past.at(-1).x !== latestAt)) past.push({ x: latestAt, y: state.roomTemp });
-    const start = past[0]?.x || now - 15 * 60000;
-    const end = Math.max(now, future.at(-1)?.time || now);
+    if (showLegacy && fresh && (!past.length || past.at(-1).x !== latestAt)) past.push({ x: latestAt, y: state.roomTemp });
+    const earliest = Math.min(dht22.A?.[0]?.x ?? Infinity, dht22.B?.[0]?.x ?? Infinity);
+    const start = Number.isFinite(earliest) ? Math.min(earliest, now - 60000) : past[0]?.x ?? now - 15 * 60000;
+    const end = Math.max(now, future.at(-1)?.time ?? now, dht22.A?.at(-1)?.x ?? now, dht22.B?.at(-1)?.x ?? now);
     const target = [];
     let priorTarget = null;
     for (const event of targetHistory) {
@@ -599,6 +630,8 @@ function renderForecast() {
     chart.data.datasets[3].data = future.map(p => ({ x: p.time, y: p.upper }));
     chart.data.datasets[4].data = future.map(p => ({ x: p.time, y: p.temp }));
     chart.data.datasets[5].data = estimating && prediction.arrivalAt <= end ? [{ x: prediction.arrivalAt, y: state.ac.temp }] : [];
+    chart.data.datasets[6].data = dht22.A ?? [];
+    chart.data.datasets[7].data = dht22.B ?? [];
     chart.coolingTimes = estimating ? { now, arrivalAt: prediction.arrivalAt, arrival, target: state.ac.temp } : null;
     chart.options.scales.x.min = start;
     chart.options.scales.x.max = Math.max(start + 60000, end);
@@ -645,10 +678,12 @@ function initChart() {
             { label: 'สถานการณ์เย็นเร็ว', data: [], borderWidth: 0, pointRadius: 0 },
             { label: 'ช่วงสถานการณ์', data: [], borderWidth: 0, pointRadius: 0, backgroundColor: 'rgba(163,19,26,.10)', fill: '-1' },
             { label: 'อุณหภูมิคาดการณ์', data: [], borderColor: '#A3131A', borderWidth: 2, borderDash: [5, 5], pointRadius: 0 },
-            { label: 'คาดว่าจะถึงเป้าหมาย', data: [], borderColor: '#711015', backgroundColor: '#711015', pointRadius: 5, pointHoverRadius: 7, showLine: false }
+            { label: 'คาดว่าจะถึงเป้าหมาย', data: [], borderColor: '#711015', backgroundColor: '#711015', pointRadius: 5, pointHoverRadius: 7, showLine: false },
+            { label: 'DHT22 A', data: [], borderColor: '#226B45', backgroundColor: '#226B45', borderWidth: 2.5, pointRadius: 3, spanGaps: false },
+            { label: 'DHT22 B', data: [], borderColor: '#165D8D', backgroundColor: '#165D8D', borderWidth: 2.5, borderDash: [7, 3], pointRadius: 3, pointStyle: 'triangle', spanGaps: false }
         ] }, options: {
             responsive: true, maintainAspectRatio: false, animation: false, parsing: false,
-            plugins: { legend: { display: false }, tooltip: { filter: item => [0, 1, 4, 5].includes(item.datasetIndex), callbacks: {
+            plugins: { legend: { display: false }, tooltip: { filter: item => [0, 1, 4, 5, 6, 7].includes(item.datasetIndex), callbacks: {
                 title: items => SmartCoolingForecastClient.clockTime(items[0].parsed.x, coolingForecast.nowOnServer()),
                 label: item => `${item.dataset.label}: ${item.parsed.y.toFixed(1)}°C`
             } } },
@@ -671,6 +706,7 @@ function appendChartPoint(force = false) {
     while (temperatureHistory.length > 40 || (temperatureHistory.length && time - temperatureHistory[0].time > 15 * 60000)) temperatureHistory.shift();
 }
 function resetChart() {
+    dht22Temperatures?.reset();
     state.chartLastAt = 0; temperatureHistory.length = 0; targetHistory.length = 0; coolingForecast.reset();
     if (chart) { chart.data.datasets.forEach(d => d.data = []); chart.coolingTimes = null; chart.update('none'); }
 }

@@ -35,13 +35,14 @@ test('login closes application routes and checks credentials, origin, expiry and
         assert.equal((await request('/login')).status, 503);
         assert.equal((await request('/login.css')).status, 200);
         assert.equal((await request('/api/auth/session')).status, 401);
-        for (const target of ['/api/schedules', '/api/cira/logs', '/js/dashboard.js', '/audio/voice/wake-ready.wav',
+        for (const target of ['/api/schedules', '/api/ac-occupancy', '/api/cira/logs', '/js/dashboard.js', '/audio/voice/wake-ready.wav',
             '/vendor/mqtt.min.js', '/vad-web/silero_vad.onnx', '/ort/ort.min.js', '/ort/ort.wasm.min.js',
             '/ort/ort-wasm-simd-threaded.wasm', '/data/login-account.json']) {
             assert.equal((await request(target)).status, 401, target);
         }
         for (const [method, target] of [['POST', '/api/voice-command'], ['POST', '/api/voice-session'],
             ['POST', '/api/schedules'], ['PATCH', '/api/schedules/unknown'], ['DELETE', '/api/schedules/unknown'],
+            ['PUT', '/api/ac-occupancy'],
             ['POST', '/api/comfort/recommendation'], ['POST', '/api/cooling-forecast']]) {
             assert.equal((await request(target, { method })).status, 401, target);
         }
@@ -106,6 +107,14 @@ test('login closes application routes and checks credentials, origin, expiry and
         const blocked = await request('/api/schedules', { method: 'POST', headers: { ...cookie, Origin: 'https://untrusted.example' } });
         assert.equal(blocked.status, 403);
         assert.equal(blocked.headers.get('access-control-allow-origin'), null);
+        const occupancy = await request('/api/ac-occupancy', { headers: cookie });
+        assert.equal(occupancy.status, 200);
+        assert.match(occupancy.headers.get('cache-control'), /no-store/);
+        assert.equal(typeof (await occupancy.json()).settings.offWhenEmpty, 'boolean');
+        const update = { method: 'PUT', body: JSON.stringify({ emptyDelayMinutes: -1 }) };
+        const jsonHeaders = { ...cookie, 'Content-Type': 'application/json' };
+        assert.equal((await request('/api/ac-occupancy', { ...update, headers: jsonHeaders })).status, 403);
+        assert.equal((await request('/api/ac-occupancy', { ...update, headers: { ...jsonHeaders, Origin: base } })).status, 400);
 
         const form = new URLSearchParams({ username, password }).toString();
         const fromTunnel = await new Promise((resolve, reject) => {

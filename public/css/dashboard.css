@@ -706,6 +706,19 @@ p+p {
   grid-template-columns:1fr 1fr;
   gap:16px 20px
 }
+.ac-occupancy-fields {
+  border:0;
+  margin:0;
+  min-width:0;
+  padding:0
+}
+.ac-occupancy-fields .checkbox-field {
+  margin-top:0
+}
+.ac-occupancy-fields .field input:disabled {
+  background:#f5f5f2;
+  color:var(--muted)
+}
 .field {
   display:flex;
   flex-direction:column;
@@ -799,6 +812,23 @@ p+p {
   font-size:18px;
   padding-top:4px
 }
+.dht22-chart-status {
+  display:inline-block;
+  margin:0 0 10px;
+  padding:4px 9px;
+  border:1px solid #dfdfd9;
+  border-radius:8px;
+  color:var(--muted);
+  font-size:12px
+}
+.dht22-chart-status[data-sensors="1"] {
+  color:#85500c;
+  background:#fff8ee
+}
+.dht22-chart-status[data-sensors="2"] {
+  color:#226b45;
+  background:#f0f7f3
+}
 .chart-container {
   height:300px;
   position:relative;
@@ -822,6 +852,13 @@ p+p {
 .legend-line {
   width:22px;
   border-top:3px solid #30302b
+}
+.legend-line.dht22-a {
+  border-color:#226b45
+}
+.legend-line.dht22-b {
+  border-color:#165d8d;
+  border-top-style:dashed
 }
 .legend-line.target {
   border-color:#85857b;

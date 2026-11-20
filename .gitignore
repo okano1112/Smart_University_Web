@@ -4,6 +4,8 @@
 node-red/runtime/
 data/ac-schedules.json
 data/ac-schedules.json.*.tmp
+data/ac-occupancy.json
+data/ac-occupancy.json.*.tmp
 data/login-account.json
 data/login-account.json.*.tmp
 __pycache__/

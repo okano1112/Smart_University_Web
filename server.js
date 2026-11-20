@@ -19,9 +19,19 @@ const { createComfortHandler } = require('./comfort-route');
 const { AcScheduler } = require('./ac-scheduler');
 const { SchedulerMqtt } = require('./ac-scheduler-mqtt');
 const { createScheduleRouter } = require('./ac-scheduler-route');
-const scheduleMqtt = new SchedulerMqtt();
+const { AcOccupancy, OccupancyError } = require('./ac-occupancy');
+const scheduleMqtt = new SchedulerMqtt({
+  onPeople: raw => acOccupancy.observe(raw),
+  onPeopleDisconnect: () => acOccupancy.disconnect()
+});
 const acScheduler = new AcScheduler({
   storePath: path.join(__dirname, 'data', 'ac-schedules.json'),
+  publish: payload => scheduleMqtt.publish(payload),
+  connection: () => scheduleMqtt.status(),
+  destination: () => scheduleMqtt.config
+});
+const acOccupancy = new AcOccupancy({
+  storePath: path.join(__dirname, 'data', 'ac-occupancy.json'),
   publish: payload => scheduleMqtt.publish(payload),
   connection: () => scheduleMqtt.status(),
   destination: () => scheduleMqtt.config
@@ -32,6 +42,9 @@ const authStore = installRoomLogin(app, { store: createAuthStore({ accountFile: 
 app.use(express.json({ limit: '100kb' }));
 app.use('/api/cooling-forecast', createCoolingForecastRouter());
 app.use('/api/schedules', createScheduleRouter({ scheduler: acScheduler }));
+app.use('/api/ac-occupancy', (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+app.get('/api/ac-occupancy', async (_req, res) => res.json(await acOccupancy.read()));
+app.put('/api/ac-occupancy', async (req, res) => res.json(await acOccupancy.update(req.body)));
 app.get('/api/cira/logs', require('./cira-logs-route').readCiraLogs);
 app.post('/api/comfort/recommendation', createComfortHandler());
 
@@ -207,6 +220,7 @@ app.post('/api/voice-transcript', voiceRoute(req => {
 }));
 app.use((error, req, res, next) => {
   if (res.headersSent) return next(error);
+  if (error instanceof OccupancyError) return res.status(error.status).json({ success: false, message: error.message });
   if (req.path.startsWith('/api/voice')) return res.status(400).json({ success: false, message: 'ไม่สามารถรับไฟล์เสียงได้ กรุณาพูดใหม่' });
   const status = error.status >= 400 && error.status < 500 ? error.status : 500;
   return res.status(status).json({ success: false, message: status === 500 ? 'ระบบขัดข้อง กรุณาลองใหม่' : 'คำขอไม่ถูกต้อง' });
@@ -214,7 +228,10 @@ app.use((error, req, res, next) => {
 
 const PORT = process.env.PORT || 3000;
 if (require.main === module) app.listen(PORT, '127.0.0.1', () => {
-  acScheduler.start().then(() => scheduleMqtt.start()).catch(error => console.error('[Schedule]', error.message));
+  Promise.allSettled([acScheduler.start(), acOccupancy.start()]).then(results => {
+    for (const result of results) if (result.status === 'rejected') console.error('[AC]', result.reason.message);
+    scheduleMqtt.start();
+  }).catch(error => console.error('[MQTT]', error.message));
   // Warm the local model once; no external AI endpoint is used.
   localVoice.start().then(() => console.log('Local Whisper พร้อมรับคำสั่ง • ไม่ใช้ AI API ภายนอก')).catch(error => console.error(error.message));
   console.log('================================================================');
@@ -228,7 +245,8 @@ if (require.main === module) {
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, async () => {
     localVoice.close();
     await authStore.close();
-    await acScheduler.close(); await scheduleMqtt.close();
+    await Promise.all([acScheduler.close(), acOccupancy.close()]);
+    await scheduleMqtt.close();
     process.exit(0);
   });
 }

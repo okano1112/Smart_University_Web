@@ -15,6 +15,7 @@
   <script defer src="/ort/ort.wasm.min.js"></script>
   <script defer src="/vad-web/bundle.min.js"></script>
   <script defer src="/js/cooling-forecast-client.js"></script>
+  <script defer src="/js/dht22-telemetry.js"></script>
   <script defer src="/js/cira-telemetry.js"></script>
   <script defer src="/js/cira-logs.js"></script>
   <script defer src="/js/cira-activity.js"></script>
@@ -24,6 +25,7 @@
   <script defer src="/js/voice-controller.js"></script>
   <script defer src="/js/voice-handsfree.js"></script>
   <script defer src="/js/ac-schedules.js"></script>
+  <script defer src="/js/ac-occupancy.js"></script>
   <script defer src="/js/dashboard.js"></script>
 </head>
 <body>
@@ -47,7 +49,7 @@
       </section>
       <section id="settings-panel" class="panel settings-panel hidden" aria-labelledby="settings-title">
         <div class="section-heading"><h2 id="settings-title">ตั้งค่าการเชื่อมต่อ</h2><button type="button" class="btn btn-secondary btn-small" onclick="toggleSettings()">ปิด</button></div>
-        <p class="text-muted">การเชื่อมต่อของหน้าเว็บ • ตารางเวลาจะใช้โบรกเกอร์ที่เซิร์ฟเวอร์ตั้งไว้</p>
+        <p class="text-muted">การเชื่อมต่อของหน้าเว็บ • ตารางเวลาและการควบคุมตามจำนวนคนใช้โบรกเกอร์ที่เซิร์ฟเวอร์ตั้งไว้</p>
         <form onsubmit="event.preventDefault();applySettings()">
           <div class="settings-grid">
             <label class="field field-wide">MQTT WebSocket URL<input id="setting-broker" type="url" required spellcheck="false"></label>
@@ -145,13 +147,42 @@
         <details class="schedule-diagnostics"><summary>ปลายทางของตัวตั้งเวลา</summary><p id="schedule-server-detail" class="text-muted schedule-server-detail"></p></details>
         <p class="text-muted schedule-note">ปิดหน้าเว็บได้ แต่เครื่องเซิร์ฟเวอร์ต้องเปิดอยู่และเชื่อมต่ออุปกรณ์ได้ เมื่อพลาดเวลาระบบจะไม่ส่งคำสั่งย้อนหลัง</p>
       </section>
+      <section class="panel schedule-panel" aria-labelledby="ac-occupancy-title">
+        <h2 id="ac-occupancy-title">ควบคุมแอร์ตามจำนวนคน</h2>
+        <p id="ac-occupancy-status" class="scheduler-status" role="status">กำลังโหลดการตั้งค่า…</p>
+        <p id="ac-occupancy-action" class="schedule-meta" hidden></p>
+        <form id="ac-occupancy-form" class="schedule-editor" aria-describedby="ac-occupancy-note">
+          <fieldset id="ac-occupancy-fields" class="schedule-form-grid ac-occupancy-fields" disabled>
+            <div>
+              <label class="checkbox-field"><input id="ac-off-when-empty" type="checkbox">ปิดแอร์เมื่อห้องว่าง</label>
+              <label class="checkbox-field"><input id="ac-on-when-occupied" type="checkbox">เปิดแอร์เมื่อตรวจพบคน</label>
+            </div>
+            <div class="field">
+              <label for="ac-empty-delay">ห้องว่างต่อเนื่อง (นาที)</label>
+              <input id="ac-empty-delay" type="number" min="0" max="1440" step="1" value="5" required aria-describedby="ac-empty-delay-help">
+              <span id="ac-empty-delay-help" class="text-muted schedule-note">ตั้งเป็น 0 เพื่อปิดทันทีเมื่อตรวจพบว่าห้องว่าง</span>
+            </div>
+          </fieldset>
+          <div class="form-actions"><button id="btn-save-ac-occupancy" type="submit" class="btn btn-primary" disabled>บันทึกการตั้งค่า</button></div>
+          <p id="ac-occupancy-message" class="schedule-message" role="status"></p>
+        </form>
+        <p id="ac-occupancy-note" class="text-muted schedule-note">ระบบทำงานต่อเมื่อปิดหน้าเว็บ ตราบใดที่เซิร์ฟเวอร์ยังรับข้อมูล CiRA CORE และเชื่อมต่อ ESP32 ได้</p>
+      </section>
       <section id="temperature-panel" class="panel chart-panel" aria-labelledby="chart-title">
         <div class="section-heading"><h2 id="chart-title">อุณหภูมิและเวลาถึงเป้าหมาย</h2><span id="forecast-source" class="source-label">รอข้อมูล</span></div>
         <p id="forecast-summary" class="forecast-summary" aria-live="polite">รออุณหภูมิห้องและสถานะแอร์ล่าสุด</p>
         <div id="cooling-forecast-panel">
           <dl class="forecast-readings"><div><dt>อุณหภูมิห้องล่าสุด</dt><dd id="forecast-current">—</dd></div><div><dt>เป้าหมายจาก ESP32</dt><dd id="forecast-target">—</dd></div><div class="arrival-reading"><dt id="forecast-arrival-label">คาดว่าจะถึงเป้าหมายเวลา</dt><dd id="forecast-arrival">—</dd></div><div class="arrival-reading"><dt>เวลาที่เหลือโดยประมาณ</dt><dd id="forecast-eta">รอข้อมูล</dd></div></dl>
-          <div class="chart-container"><canvas id="tempChart" aria-label="กราฟอุณหภูมิห้องจริง เป้าหมาย และเวลาที่คาดว่าจะถึงเป้าหมาย" role="img"></canvas></div>
-          <div class="chart-legend" aria-label="คำอธิบายกราฟ"><span><i class="legend-line actual"></i>อุณหภูมิห้องจริง</span><span><i class="legend-line target"></i>เป้าหมาย</span><span><i class="legend-line prediction"></i>คาดการณ์</span><span><i class="legend-area"></i>ช่วงสถานการณ์</span></div>
+          <p id="dht22-chart-status" class="dht22-chart-status" role="status">รอข้อมูล DHT22</p>
+          <div class="chart-container"><canvas id="tempChart" aria-label="กราฟอุณหภูมิที่วัดได้ เป้าหมาย และการคาดการณ์" aria-describedby="dht22-chart-status" role="img"></canvas></div>
+          <div class="chart-legend" aria-label="คำอธิบายกราฟ">
+            <span id="legend-legacy-temp"><i class="legend-line actual" aria-hidden="true"></i>อุณหภูมิห้อง (เซนเซอร์เดิม)</span>
+            <span id="legend-dht22-a" hidden><i class="legend-line dht22-a" aria-hidden="true"></i>DHT22 A</span>
+            <span id="legend-dht22-b" hidden><i class="legend-line dht22-b" aria-hidden="true"></i>DHT22 B</span>
+            <span><i class="legend-line target" aria-hidden="true"></i>เป้าหมาย</span>
+            <span><i class="legend-line prediction" aria-hidden="true"></i><span id="legend-forecast-label">คาดการณ์</span></span>
+            <span><i class="legend-area" aria-hidden="true"></i>ช่วงสถานการณ์</span>
+          </div>
           <p id="forecast-detail" class="text-muted">รอข้อมูลล่าสุด</p><p id="forecast-range" class="text-muted"></p>
           <details class="advanced-settings"><summary>การคำนวณเวลา</summary><p>ใช้แนวโน้มจากเซนเซอร์เมื่อมีข้อมูลเพียงพอ ระหว่างรอใช้ความเร็วการลดอุณหภูมิเบื้องต้น</p><label class="inline-field" for="forecast-rate">อัตราเบื้องต้น<input id="forecast-rate" type="number" min="0.02" max="0.5" step="0.01" value="0.10" aria-describedby="forecast-rate-help" onchange="changeForecastRate()">°C / นาที</label><p id="forecast-rate-help" class="text-muted">เป็นเวลาประมาณ ซึ่งเปลี่ยนตามสภาพห้อง จำนวนคน และกำลังแอร์ การเปลี่ยนค่านี้ไม่สั่งแอร์</p></details>
         </div>

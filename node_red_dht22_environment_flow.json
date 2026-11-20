@@ -1,0 +1,230 @@
+[
+  {
+    "id": "d422000000000001",
+    "type": "tab",
+    "label": "DHT22 • Classroom Environment",
+    "disabled": false,
+    "info": "รับค่าจาก DHT22 จุด A และ B ตรวจเวลาที่วัด และเผยแพร่ข้อมูลสภาพห้องผ่าน MQTT เฉพาะเพื่ออ่านค่า",
+    "env": []
+  },
+  {
+    "id": "d422000000000002",
+    "type": "mqtt-broker",
+    "name": "DHT22 • broker.emqx.io",
+    "broker": "broker.emqx.io",
+    "port": "1883",
+    "clientid": "",
+    "autoConnect": true,
+    "usetls": false,
+    "protocolVersion": "4",
+    "keepalive": "30",
+    "cleansession": true,
+    "autoUnsubscribe": true,
+    "birthTopic": "",
+    "closeTopic": "",
+    "willTopic": ""
+  },
+  {
+    "id": "d422000000000003",
+    "type": "mqtt in",
+    "z": "d422000000000001",
+    "name": "DHT22 สองจุด A และ B",
+    "topic": "spu/classroom/environment/dht22",
+    "qos": "0",
+    "datatype": "utf8",
+    "broker": "d422000000000002",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 210,
+    "y": 100,
+    "wires": [
+      [
+        "d422000000000004"
+      ]
+    ]
+  },
+  {
+    "id": "d422000000000004",
+    "type": "function",
+    "z": "d422000000000001",
+    "name": "ตรวจค่าจริงและรวมข้อมูลห้อง",
+    "func": "const MAX_AGE_MS = 30000;\nconst MAX_FUTURE_MS = 5000;\nconst MAX_TEMP_SPREAD = 2;\nconst validateReading = function validateReading(raw, retained, readings, now) {\n    if (retained) return { reason: 'retained' };\n    if (typeof raw !== 'string' || raw.length > 2048) return { reason: 'invalid_payload' };\n    let value;\n    try { value = JSON.parse(raw); }\n    catch (_) { return { reason: 'invalid_payload' }; }\n    if (!value || typeof value !== 'object' || Array.isArray(value)) return { reason: 'invalid_payload' };\n\n    const { sensor_id: id, temperature, humidity, captured_at } = value;\n    if (id !== 'A' && id !== 'B') return { reason: 'invalid_sensor' };\n    if (!Number.isFinite(temperature) || temperature < -40 || temperature > 80 ||\n        !Number.isFinite(humidity) || humidity < 0 || humidity > 100) return { reason: 'invalid_reading' };\n    if (!Number.isSafeInteger(captured_at) || captured_at <= 0) return { reason: 'invalid_timestamp' };\n    if (now - captured_at >= MAX_AGE_MS) return { reason: 'stale_sample' };\n    if (captured_at - now > MAX_FUTURE_MS) return { reason: 'future_sample' };\n    if (readings[id] && captured_at <= readings[id].captured_at) return { reason: 'out_of_order' };\n    return { id, reading: { temperature, humidity, captured_at } };\n};\nconst makeSnapshot = function makeSnapshot(readings, now) {\n    const inspect = reading => {\n        if (!reading) return { state: 'waiting', reading: null };\n        const stale = now - reading.captured_at >= MAX_AGE_MS || reading.captured_at - now > MAX_FUTURE_MS;\n        return { state: stale ? 'stale' : 'fresh', reading };\n    };\n    const A = inspect(readings.A);\n    const B = inspect(readings.B);\n    const data = { source: 'dht22', generated_at: now, state: 'waiting', sensors: { A, B }, room: null };\n    if (A.state === 'stale' || B.state === 'stale') data.state = 'stale';\n    else if (A.state === 'fresh' && B.state === 'fresh') {\n        if (Math.abs(A.reading.temperature - B.reading.temperature) > MAX_TEMP_SPREAD + 1e-9) data.state = 'divergent';\n        else {\n            data.state = 'ready';\n            data.room = {\n                temperature: (A.reading.temperature + B.reading.temperature) / 2,\n                humidity: (A.reading.humidity + B.reading.humidity) / 2\n            };\n        }\n    }\n    return data;\n};\nconst now = Date.now();\nconst readings = context.get('readings') || {};\nconst watchdog = msg._dht22Watchdog === true;\nif (watchdog && !readings.A && !readings.B) return null;\nif (!watchdog) {\n    const result = validateReading(msg.payload, msg.retain === true, readings, now);\n    if (result.reason) return [null, {payload:{event:'dht22_rejected',reason:result.reason}}];\n    readings[result.id] = result.reading;\n    context.set('readings', readings);\n}\nconst snapshot = makeSnapshot(readings, now);\nconst states = [snapshot.sensors.A.state, snapshot.sensors.B.state].join('/');\nif (watchdog && (snapshot.state !== 'stale' || states === context.get('publishedStates'))) return null;\ncontext.set('publishedStates', states);\nconst styles = {\n    waiting: {fill:'grey',shape:'ring',text:'รอข้อมูล DHT22 ครบสองจุด'},\n    stale: {fill:'red',shape:'ring',text:'ข้อมูล DHT22 ขาดช่วง'},\n    divergent: {fill:'yellow',shape:'ring',text:'อุณหภูมิสองจุดต่างกันเกิน 2°C'},\n    ready: {fill:'green',shape:'dot',text:'ข้อมูล DHT22 สองจุดพร้อม'}\n};\nnode.status(styles[snapshot.state]);\nreturn [{topic:'spu/classroom/environment',payload:JSON.stringify(snapshot),qos:0,retain:false},\n    {payload:{event:'dht22_snapshot',snapshot}}];",
+    "outputs": 2,
+    "timeout": 1,
+    "noerr": 0,
+    "initialize": "context.set('readings', {});context.set('publishedStates',null);node.status({fill:'grey',shape:'ring',text:'รอข้อมูล DHT22 ครบสองจุด'});",
+    "finalize": "",
+    "libs": [],
+    "x": 530,
+    "y": 100,
+    "wires": [
+      [
+        "d422000000000005"
+      ],
+      [
+        "d422000000000006"
+      ]
+    ]
+  },
+  {
+    "id": "d422000000000005",
+    "type": "mqtt out",
+    "z": "d422000000000001",
+    "name": "สภาพห้อง → MQTT (nonretained)",
+    "topic": "spu/classroom/environment",
+    "qos": "0",
+    "retain": "false",
+    "broker": "d422000000000002",
+    "x": 880,
+    "y": 80,
+    "wires": []
+  },
+  {
+    "id": "d422000000000006",
+    "type": "debug",
+    "z": "d422000000000001",
+    "name": "DHT22 • ข้อมูลจริง",
+    "active": false,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "x": 865,
+    "y": 140,
+    "wires": []
+  },
+  {
+    "id": "d422000000000007",
+    "type": "inject",
+    "z": "d422000000000001",
+    "name": "ตรวจข้อมูลขาดช่วงทุก 5 วินาที",
+    "props": [
+      {
+        "p": "_dht22Watchdog",
+        "v": "true",
+        "vt": "bool"
+      }
+    ],
+    "repeat": "5",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "x": 215,
+    "y": 165,
+    "wires": [
+      [
+        "d422000000000004"
+      ]
+    ]
+  },
+  {
+    "id": "d422000000000008",
+    "type": "inject",
+    "z": "d422000000000001",
+    "name": "ทดสอบ • สองจุดพร้อม",
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "payload": "ready",
+    "payloadType": "str",
+    "x": 210,
+    "y": 260,
+    "wires": [
+      [
+        "d422000000000011"
+      ]
+    ]
+  },
+  {
+    "id": "d422000000000009",
+    "type": "inject",
+    "z": "d422000000000001",
+    "name": "ทดสอบ • ขาดข้อมูลจุด B",
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "payload": "missing",
+    "payloadType": "str",
+    "x": 210,
+    "y": 320,
+    "wires": [
+      [
+        "d422000000000011"
+      ]
+    ]
+  },
+  {
+    "id": "d422000000000010",
+    "type": "inject",
+    "z": "d422000000000001",
+    "name": "ทดสอบ • สองจุดต่างกัน",
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "payload": "divergent",
+    "payloadType": "str",
+    "x": 210,
+    "y": 380,
+    "wires": [
+      [
+        "d422000000000011"
+      ]
+    ]
+  },
+  {
+    "id": "d422000000000011",
+    "type": "function",
+    "z": "d422000000000001",
+    "name": "ทดสอบกฎด้วยข้อมูลจำลอง",
+    "func": "const MAX_AGE_MS = 30000;\nconst MAX_FUTURE_MS = 5000;\nconst MAX_TEMP_SPREAD = 2;\nconst validateReading = function validateReading(raw, retained, readings, now) {\n    if (retained) return { reason: 'retained' };\n    if (typeof raw !== 'string' || raw.length > 2048) return { reason: 'invalid_payload' };\n    let value;\n    try { value = JSON.parse(raw); }\n    catch (_) { return { reason: 'invalid_payload' }; }\n    if (!value || typeof value !== 'object' || Array.isArray(value)) return { reason: 'invalid_payload' };\n\n    const { sensor_id: id, temperature, humidity, captured_at } = value;\n    if (id !== 'A' && id !== 'B') return { reason: 'invalid_sensor' };\n    if (!Number.isFinite(temperature) || temperature < -40 || temperature > 80 ||\n        !Number.isFinite(humidity) || humidity < 0 || humidity > 100) return { reason: 'invalid_reading' };\n    if (!Number.isSafeInteger(captured_at) || captured_at <= 0) return { reason: 'invalid_timestamp' };\n    if (now - captured_at >= MAX_AGE_MS) return { reason: 'stale_sample' };\n    if (captured_at - now > MAX_FUTURE_MS) return { reason: 'future_sample' };\n    if (readings[id] && captured_at <= readings[id].captured_at) return { reason: 'out_of_order' };\n    return { id, reading: { temperature, humidity, captured_at } };\n};\nconst makeSnapshot = function makeSnapshot(readings, now) {\n    const inspect = reading => {\n        if (!reading) return { state: 'waiting', reading: null };\n        const stale = now - reading.captured_at >= MAX_AGE_MS || reading.captured_at - now > MAX_FUTURE_MS;\n        return { state: stale ? 'stale' : 'fresh', reading };\n    };\n    const A = inspect(readings.A);\n    const B = inspect(readings.B);\n    const data = { source: 'dht22', generated_at: now, state: 'waiting', sensors: { A, B }, room: null };\n    if (A.state === 'stale' || B.state === 'stale') data.state = 'stale';\n    else if (A.state === 'fresh' && B.state === 'fresh') {\n        if (Math.abs(A.reading.temperature - B.reading.temperature) > MAX_TEMP_SPREAD + 1e-9) data.state = 'divergent';\n        else {\n            data.state = 'ready';\n            data.room = {\n                temperature: (A.reading.temperature + B.reading.temperature) / 2,\n                humidity: (A.reading.humidity + B.reading.humidity) / 2\n            };\n        }\n    }\n    return data;\n};\nconst now = Date.now();\nconst readings = {};\nconst sampleA = {sensor_id:'A',temperature:25,humidity:50,captured_at:now};\nconst sampleB = {sensor_id:'B',temperature:26,humidity:54,captured_at:now};\nconst examples = {\n    ready: [sampleA, sampleB],\n    missing: [sampleA],\n    divergent: [sampleA, {...sampleB,temperature:29}]\n};\nconst samples = examples[msg.payload];\nif (!Array.isArray(samples)) return null;\nfor (const sample of samples) {\n    const result = validateReading(JSON.stringify(sample), false, readings, now);\n    if (result.reason) return {payload:{event:'dht22_test',scenario:msg.payload,reason:result.reason}};\n    readings[result.id] = result.reading;\n}\nreturn {payload:{event:'dht22_test',scenario:msg.payload,snapshot:makeSnapshot(readings, now)}};",
+    "outputs": 1,
+    "timeout": 1,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 530,
+    "y": 320,
+    "wires": [
+      [
+        "d422000000000012"
+      ]
+    ]
+  },
+  {
+    "id": "d422000000000012",
+    "type": "debug",
+    "z": "d422000000000001",
+    "name": "DHT22 • ผลจำลองใน Debug",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "x": 870,
+    "y": 320,
+    "wires": []
+  }
+]

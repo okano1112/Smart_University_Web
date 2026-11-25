@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node server.js",
+    "camera:start": "node scripts/start-camera.js",
     "auth:setup": "node scripts/setup-login.js",
     "auth:check": "node scripts/check-login.js",
     "db:check": "node scripts/check-login.js --require-database",

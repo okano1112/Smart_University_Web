@@ -20,7 +20,7 @@ docker compose ps
 
 บนเครื่องเซิร์ฟเวอร์ เปิดเว็บที่ `http://127.0.0.1:3000/` และ Node-RED ที่ `http://127.0.0.1:1880/` ดูรายละเอียดบัญชีใน [คู่มือเข้าสู่ระบบ](LOGIN.md)
 
-หากต้องการดูภาพกล้องในแดชบอร์ด ให้เปิดโปรไฟล์ `camera` ตาม [คู่มือต่อกล้อง RTSP](CAMERA.md)
+หากต้องการดูภาพกล้องในแดชบอร์ด ให้ตั้งค่า `camera.env` และใช้โปรไฟล์ `camera` ตาม [คู่มือต่อกล้อง RTSP](CAMERA.md) เมื่อรัน `Start-BimClub.cmd` ตัวเริ่มระบบจะเปิดโปรไฟล์นี้ให้อัตโนมัติถ้ามี `camera.env`
 
 ### เข้าเว็บจากอีกเครื่อง
 
@@ -103,7 +103,7 @@ Invoke-RestMethod http://127.0.0.1:1880/cira-activity
 
 ## อัปเดต
 
-แตก ZIP รุ่นใหม่ลงโฟลเดอร์เดิม แล้วรัน `Start-BimClub.cmd` อีกครั้ง ตัวเริ่มระบบโหลด image ใหม่และสร้าง container ทั้งคู่พร้อมกัน โดยใช้ named volumes เดิม
+แตก ZIP รุ่นใหม่ลงโฟลเดอร์เดิม แล้วรัน `Start-BimClub.cmd` อีกครั้ง ตัวเริ่มระบบโหลด image ใหม่และสร้าง container พร้อมกัน โดยใช้ named volumes เดิม หากมี `camera.env` จะเริ่ม MediaMTX พร้อมเว็บและ Node-RED
 
 ถ้ารันจากซอร์ส ให้คัดลอกโค้ดรุ่นใหม่มาในโฟลเดอร์เดิมและรัน `docker compose build` ให้สำเร็จก่อน จากนั้นรันคำสั่งด้านล่างเพื่อสร้างเว็บกับ Node-RED พร้อมกันโดยใช้ named volumes เดิม คำสั่ง `down` ในตัวอย่างจะหยุดบริการชั่วคราวระหว่างอัปเดต [รายละเอียด `docker compose down`](https://docs.docker.com/reference/cli/docker/compose/down/)
 
@@ -112,6 +112,8 @@ docker compose down
 docker compose up -d --no-build --pull never --wait --wait-timeout 180
 docker compose ps
 ```
+
+หากเปิดกล้อง ให้เพิ่ม `--profile camera` หลัง `docker compose` ในคำสั่ง `down`, `up` และ `ps` ตาม [คู่มือต่อกล้อง RTSP](CAMERA.md)
 
 หากต้องการหยุดหรือเปิดคอนเทนเนอร์ชุดที่ติดตั้งอยู่ ใช้คำสั่งต่อไปนี้ตามที่ต้องการ
 

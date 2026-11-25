@@ -22,6 +22,18 @@
 
 Workers VPC ยังอยู่ในช่วง Beta และต้องใช้ `cloudflared` 2025.7.0 ขึ้นไปกับ QUIC ผ่าน UDP ขาออกพอร์ต 7844 [ข้อกำหนด Tunnel สำหรับ Workers VPC](https://developers.cloudflare.com/workers-vpc/configuration/tunnel/#create-and-run-tunnel-cloudflared)
 
+## เปิดภาพสดเมื่อรันเว็บบน Windows โดยตรง
+
+ให้เปิด MediaMTX บนเครื่อง Windows เครื่องเดียวกับเว็บเพื่อแปลงสตรีม RTSP เป็น HLS ตรวจว่าเครื่องนี้เข้าถึงกล้องได้ แล้วคัดลอก `camera.env.example` เป็น `camera.env` และใส่ URL กล้องตามคู่มือ คำสั่งด้านล่างใช้ไฟล์ `camera/mediamtx.yml` และเปิด HLS เฉพาะที่ `127.0.0.1:8888` เพื่อให้เว็บส่งภาพต่อหลังเข้าสู่ระบบ [คู่มือกล้อง RTSP](../CAMERA.md) · [ดาวน์โหลด MediaMTX v1.21.4 สำหรับ Windows](https://github.com/bluenviron/mediamtx/releases/tag/v1.21.4)
+
+```powershell
+npm.cmd run camera:start -- "C:\MediaMTX\mediamtx.exe"
+```
+
+ถ้าเพิ่ม `mediamtx.exe` ใน `PATH` แล้ว ใช้ `npm.cmd run camera:start` ได้ ปล่อยให้ MediaMTX รันคู่กับ `npm.cmd start` แล้วเข้าหน้าแดชบอร์ดผ่าน Worker และกด **เปิดภาพสด** หากรันเว็บผ่าน Docker ให้ใช้โปรไฟล์ `camera` ของ Docker [คู่มือกล้อง RTSP](../CAMERA.md)
+
+ถ้าต้องการให้ภาพสดกลับมาเองหลังรีสตาร์ต ให้สร้างงาน **At startup** เพิ่มใน Task Scheduler ใช้ `node.exe` ใน **Program/script** ใส่ `scripts\start-camera.js "C:\MediaMTX\mediamtx.exe"` ใน **Add arguments** และใส่โฟลเดอร์โปรเจกต์ใน **Start in** ใช้บัญชีที่อ่าน `camera.env` ได้และตั้งให้งานรันได้ต่อเนื่องเหมือนงานเปิดเว็บ [คู่มือ Task Scheduler](https://learn.microsoft.com/en-us/windows/win32/taskschd/task-scheduler-page)
+
 ## เปิดกลับหลังรีสตาร์ตหรือลง Windows ใหม่
 
 - หลังรีสตาร์ต ตรวจ `Get-Service cloudflared` ใน PowerShell แล้วเปิดเว็บด้วย `npm.cmd start` ในโฟลเดอร์โปรเจกต์ หากต้องการให้เว็บเริ่มตอนเปิดเครื่อง ให้สร้างงานใน **Task Scheduler** แบบ **At startup** ใช้บัญชี Windows เดียวกับที่ติดตั้ง Engi เลือกให้รันได้แม้ยังไม่ได้ลงชื่อเข้าใช้ ตั้ง **Program/script** เป็นพาธเต็มของ `node.exe` ตั้ง **Add arguments** เป็น `server.js` และ **Start in** เป็นพาธโฟลเดอร์โปรเจกต์ ในแท็บ **Settings** เอาเครื่องหมายถูกหน้า **Stop the task if it runs longer than** ออกเพื่อให้เว็บเปิดต่อเนื่อง [คู่มือ Task Scheduler](https://learn.microsoft.com/en-us/windows/win32/taskschd/task-scheduler-start-page) · [เวลารันของงาน](https://learn.microsoft.com/en-us/windows/win32/taskschd/tasksettings-executiontimelimit)

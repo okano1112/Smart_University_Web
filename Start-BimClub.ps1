@@ -63,16 +63,26 @@ try {
         Invoke-Docker @('compose', 'build')
     }
 
-    # Recreate both network-sharing containers together. Named volumes persist.
-    Invoke-Docker @('compose', 'down', '--remove-orphans')
-    Invoke-Docker @('compose', 'up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '180')
+    $compose = @('compose')
+    if (Test-Path -LiteralPath 'camera.env' -PathType Leaf) {
+        $compose += @('--profile', 'camera')
+    }
 
-    & docker compose exec -T web node scripts/check-login.js
+    $services = @(Invoke-Docker ($compose + @('config', '--services')))
+    if ($services -contains 'camera') {
+        Invoke-Docker ($compose + @('pull', '--policy', 'missing', 'camera'))
+    }
+
+    # Stop the old camera before replacing the web container that owns its network.
+    Invoke-Docker @('compose', '--profile', 'camera', 'down', '--remove-orphans')
+    Invoke-Docker ($compose + @('up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '180'))
+
+    & docker @compose exec -T web node scripts/check-login.js
     $accountStatus = $LASTEXITCODE
     if ($accountStatus -ne 0) {
         throw 'The BimClub login is not ready. Check the web container logs and LOGIN.md, then run again.'
     }
-    Invoke-Docker @('compose', 'ps')
+    Invoke-Docker ($compose + @('ps'))
     Write-Host 'BimClub is ready at http://127.0.0.1:3000/'
     Write-Host 'Node-RED is ready at http://127.0.0.1:1880/'
     Write-Host 'The existing Cloudflare service can continue using 127.0.0.1:3000.'

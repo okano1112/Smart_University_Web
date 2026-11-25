@@ -21,7 +21,7 @@ try {
     if ($LASTEXITCODE -ne 0 -or $engine -ne 'linux') {
         throw 'Start Docker Desktop with the Linux container engine, then run this file again.'
     }
-    Invoke-Docker @('compose', 'version')
+    Invoke-Docker -DockerArguments @('compose', 'version')
     foreach ($directory in @('seed\web', 'seed\node-red')) {
         New-Item -ItemType Directory -Force -Path $directory | Out-Null
     }
@@ -55,12 +55,12 @@ try {
                 $expected = $manifest.PSObject.Properties[$relative].Value
                 $actual = (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
                 if ($actual -ne $expected) { throw "Checksum mismatch for $relative. Extract the original ZIP again." }
-                Invoke-Docker @('image', 'load', '--input', $archive.FullName)
+                Invoke-Docker -DockerArguments @('image', 'load', '--input', $archive.FullName)
             }
         }
     } else {
         Write-Host 'Building BimClub images and preparing the speech models...'
-        Invoke-Docker @('compose', 'build')
+        Invoke-Docker -DockerArguments @('compose', 'build')
     }
 
     $compose = @('compose')
@@ -68,21 +68,21 @@ try {
         $compose += @('--profile', 'camera')
     }
 
-    $services = @(Invoke-Docker ($compose + @('config', '--services')))
+    $services = @(Invoke-Docker -DockerArguments ($compose + @('config', '--services')))
     if ($services -contains 'camera') {
-        Invoke-Docker ($compose + @('pull', '--policy', 'missing', 'camera'))
+        Invoke-Docker -DockerArguments ($compose + @('pull', '--policy', 'missing', 'camera'))
     }
 
     # Stop the old camera before replacing the web container that owns its network.
-    Invoke-Docker @('compose', '--profile', 'camera', 'down', '--remove-orphans')
-    Invoke-Docker ($compose + @('up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '180'))
+    Invoke-Docker -DockerArguments @('compose', '--profile', 'camera', 'down', '--remove-orphans')
+    Invoke-Docker -DockerArguments ($compose + @('up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '180'))
 
     & docker @compose exec -T web node scripts/check-login.js
     $accountStatus = $LASTEXITCODE
     if ($accountStatus -ne 0) {
         throw 'The BimClub login is not ready. Check the web container logs and LOGIN.md, then run again.'
     }
-    Invoke-Docker ($compose + @('ps'))
+    Invoke-Docker -DockerArguments ($compose + @('ps'))
     Write-Host 'BimClub is ready at http://127.0.0.1:3000/'
     Write-Host 'Node-RED is ready at http://127.0.0.1:1880/'
     Write-Host 'The existing Cloudflare service can continue using 127.0.0.1:3000.'

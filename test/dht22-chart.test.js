@@ -20,7 +20,7 @@ function element(hidden = false) {
     };
 }
 
-async function dashboard() {
+async function dashboard({ serverClockOffset = 0 } = {}) {
     const events = new EventEmitter();
     const elements = new Map([...html.matchAll(/<[^>]+\bid="([^"]+)"[^>]*>/g)]
         .map(([tag, id]) => [id, element(/\shidden(?:\s|>)/.test(tag))]));
@@ -52,6 +52,8 @@ async function dashboard() {
     const location = { href: 'http://localhost:3000/', origin: 'http://localhost:3000' };
     const intervals = new Map();
     const forecastInputs = [];
+    const heldForecasts = [];
+    let holdForecasts = false;
     let now = Date.parse('2026-11-20T03:00:00Z');
     const sandbox = {
         document, location, URL, DOMException, AbortSignal, AbortController, Chart,
@@ -69,11 +71,12 @@ async function dashboard() {
             assert.equal(resource, '/api/cooling-forecast');
             const input = JSON.parse(options.body);
             forecastInputs.push(input);
-            const at = input.sensorAt || now;
-            return {
+            const at = (input.sensorAt || now) + serverClockOffset;
+            const generatedAt = now + serverClockOffset;
+            const result = {
                 ok: true,
                 json: async () => ({
-                    kind: 'estimate', source: 'measured', generatedAt: now,
+                    kind: 'estimate', source: 'measured', generatedAt,
                     arrivalAt: at + 120000, earliestAt: at + 90000, latestAt: at + 150000, rate: 0.1,
                     points: [
                         { time: at, temp: input.roomTemp, lower: input.roomTemp, upper: input.roomTemp },
@@ -81,6 +84,10 @@ async function dashboard() {
                     ]
                 })
             };
+            if (!holdForecasts) return result;
+            return new Promise(resolve => heldForecasts.push({
+                signal: options.signal, release: () => resolve(result)
+            }));
         },
         SmartAcSchedules: { install: () => ({ refresh() {} }) },
         SmartVoiceController: class {},
@@ -115,6 +122,10 @@ async function dashboard() {
     };
     return {
         send, snapshot, subscriptions, forecastInputs, visible, client,
+        holdForecasts: () => { holdForecasts = true; },
+        heldForecasts,
+        markers: () => chart.coolingTimes,
+        axisEnd: () => chart.options.scales.x.max,
         sample: temperature => ({ temperature, humidity: 45, captured_at: now }),
         advance: ms => { now += ms; intervals.get(1000)(); },
         text: id => elements.get(id).textContent,
@@ -176,6 +187,67 @@ test('fresh legacy temperature counts as one point only while no identified DHT2
     assert.deepEqual(h.visible(0), []);
 });
 
+test('legacy chart keeps the forecast and timestamps stable while fresh readings queue for a response', async () => {
+    const serverClockOffset = 6000;
+    const h = await dashboard({ serverClockOffset });
+    const legacy = 'spu/classroom/middle/temp';
+    const statusTopic = 'spu/classroom/status';
+    const status = { power: 'ON', temp: 24, mode: 'COOL', fan: 'HIGH' };
+    h.send(statusTopic, status);
+    h.send(legacy, 26.3);
+    await flush();
+
+    const series = () => [2, 3, 4, 5].map(h.visible);
+    const original = series();
+    const originalArrival = h.markers().arrivalAt;
+    const originalEnd = h.axisEnd();
+    const firstReading = h.visible(0)[0];
+    const requestCount = h.forecastInputs.length;
+    assert.ok(original.every(points => points.length > 0));
+
+    h.holdForecasts();
+    h.advance(7000);
+    h.send(legacy, 26.1);
+    assert.equal(h.heldForecasts.length, 1);
+    assert.deepEqual(series(), original);
+    assert.equal(h.markers().arrivalAt, originalArrival);
+    assert.equal(h.axisEnd(), originalEnd);
+    assert.deepEqual(h.visible(0).at(-1), { x: h.sample(26.1).captured_at + serverClockOffset, y: 26.1 });
+    assert.deepEqual(h.visible(0)[0], firstReading);
+
+    h.advance(2000);
+    h.send(statusTopic, status);
+    assert.equal(h.forecastInputs.length, requestCount + 1);
+    h.advance(3000);
+    h.send(legacy, 25.9);
+    const latestAt = h.sample(25.9).captured_at;
+    assert.equal(h.forecastInputs.length, requestCount + 1);
+    assert.equal(h.heldForecasts[0].signal.aborted, false);
+    assert.deepEqual(series(), original);
+    assert.equal(h.markers().arrivalAt, originalArrival);
+    assert.equal(h.axisEnd(), originalEnd);
+    assert.deepEqual(h.visible(0).at(-1), { x: latestAt + serverClockOffset, y: 25.9 });
+
+    h.heldForecasts[0].release();
+    await flush();
+    assert.equal(h.heldForecasts.length, 2);
+    assert.equal(h.forecastInputs.at(-1).roomTemp, 25.9);
+    assert.equal(h.forecastInputs.at(-1).sensorAt, latestAt);
+    h.heldForecasts[1].release();
+    await flush();
+    assert.notDeepEqual(series(), original);
+    assert.deepEqual(h.visible(4)[0], { x: latestAt + serverClockOffset, y: 25.9 });
+    assert.equal(h.markers().arrivalAt, latestAt + serverClockOffset + 120_000);
+    assert.equal(h.axisEnd(), h.markers().arrivalAt);
+    assert.deepEqual(h.visible(0).at(-1), h.visible(4)[0]);
+
+    const updated = series();
+    h.advance(1000);
+    h.send(statusTopic, status);
+    assert.equal(h.forecastInputs.length, requestCount + 2);
+    assert.deepEqual(series(), updated);
+});
+
 test('legacy chart labels recent history during an MQTT outage and resumes live readings after reconnect', async () => {
     const h = await dashboard();
     const legacy = 'spu/classroom/middle/temp';
@@ -201,6 +273,8 @@ test('legacy chart labels recent history during an MQTT outage and resumes live 
     assert.equal(h.visible(0).at(-1).y, 26.3);
     assert.ok(h.visible(1).some(point => point.y === 24));
     assert.deepEqual(h.visible(4), []);
+    assert.equal(h.markers(), null);
+    assert.equal(h.legendHidden('legend-forecast'), true);
     assert.equal(h.text('forecast-arrival'), '—');
 
     h.advance(5000);

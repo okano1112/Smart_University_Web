@@ -1,6 +1,9 @@
 (function (root) {
     'use strict';
     const MINUTE = 60000;
+    const SENSOR_MAX_AGE = 30_000;
+    const STATUS_MAX_AGE = 75_000;
+    const isRecent = (time, now, maxAge) => time > 0 && time <= now && now - time < maxAge;
     const unavailable = message => ({ kind: 'unavailable', message, points: [] });
 
     // Collect observations and display server results; the cooling model runs on Node.js.
@@ -10,8 +13,12 @@
             this.context = null; this.samples = []; this.result = null; this.generation = 0; this.clockOffset = 0;
         }
         reset(context = null) {
+            this.clearRequest();
+            this.context = context; this.samples = []; this.plan = null;
+        }
+        clearRequest() {
             this.controller?.abort(); this.controller = null; this.generation++;
-            this.context = context; this.samples = []; this.result = null; this.key = null; this.failed = false;
+            this.result = null; this.key = undefined; this.failed = false;
         }
         record({ time, temp, context }) {
             if (context !== this.context) this.reset(context);
@@ -26,20 +33,30 @@
         nowOnServer() { return this.now() + this.clockOffset; }
         sync(input, context) {
             if (context !== this.context) this.reset(context);
-            const payload = { ...input, samples: this.samples.slice() }, key = JSON.stringify(payload);
-            if (key !== this.key || (this.failed && this.now() - this.requestAt >= 5000)) this.request(payload, key);
-            const result = this.result || { kind: 'loading', message: 'เซิร์ฟเวอร์กำลังคำนวณเวลาถึงเป้าหมาย', points: [] };
-            // Telemetry timestamps are captured by this browser. Compare them in
-            // the same clock domain; the server offset is only for its arrival time.
             const now = this.now();
-            if (!input.sensorAt || now - input.sensorAt > 30000 || now < input.sensorAt) return unavailable('รออุณหภูมิห้องล่าสุดจากเซนเซอร์');
-            if (!input.statusFresh || !input.statusAt || now - input.statusAt > 75000 || now < input.statusAt) return unavailable('รอสถานะล่าสุดจาก ESP32');
-            return result;
+            const sensorFresh = isRecent(input.sensorAt, now, SENSOR_MAX_AGE);
+            const statusFresh = input.statusFresh && isRecent(input.statusAt, now, STATUS_MAX_AGE);
+            const eligible = sensorFresh && statusFresh && !input.pending && input.power === true && input.mode === 0;
+            const plan = JSON.stringify([input.target, input.power, input.mode, input.assumedRate, !!input.pending, sensorFresh, statusFresh]);
+            if (plan !== this.plan) { this.clearRequest(); this.plan = plan; }
+
+            // Heartbeats refresh status liveness. Only a new observation changes
+            // a calculation within the same AC settings and freshness state.
+            const key = eligible ? JSON.stringify([input.sensorAt, input.roomTemp, this.samples]) : null;
+            const needsRequest = this.failed ? now - this.requestAt >= 5000 : key !== this.key;
+            if (!this.controller && needsRequest) this.request({ ...input, samples: this.samples.slice() }, key);
+            if (!sensorFresh) return unavailable('รออุณหภูมิห้องล่าสุดจากเซนเซอร์');
+            if (!statusFresh) return unavailable('รอสถานะล่าสุดจาก ESP32');
+            if (input.pending) return unavailable('รอ ESP32 รายงานค่าที่ตั้งใหม่ก่อนคาดการณ์');
+
+            const result = this.result;
+            if (result && (result.kind === 'unavailable' || isRecent(result.observedAt, now, SENSOR_MAX_AGE))) return result;
+            return { kind: 'loading', message: 'เซิร์ฟเวอร์กำลังคำนวณเวลาถึงเป้าหมาย', points: [] };
         }
         async request(payload, key) {
-            this.controller?.abort();
             const controller = new AbortController(), generation = ++this.generation, started = this.now();
-            this.controller = controller; this.key = key; this.result = null; this.failed = false; this.requestAt = started;
+            if (this.failed) this.result = null;
+            this.controller = controller; this.key = key; this.failed = false; this.requestAt = started;
             const timeout = setTimeout(() => controller.abort(), 8000);
             try {
                 const response = await this.fetch('/api/cooling-forecast', {
@@ -47,8 +64,11 @@
                 });
                 const data = await response.json();
                 if (generation !== this.generation) return;
-                if (!response.ok || !['estimate', 'unavailable', 'reached'].includes(data.kind) || !Array.isArray(data.points)) throw new Error('คำนวณเวลาไม่สำเร็จ');
-                this.result = data;
+                if (controller.signal.aborted || !response.ok || !['estimate', 'unavailable', 'reached'].includes(data.kind) ||
+                    !Array.isArray(data.points) || (data.kind === 'estimate' && !Number.isFinite(data.points[0]?.time))) {
+                    throw new Error('คำนวณเวลาไม่สำเร็จ');
+                }
+                this.result = { ...data, observedAt: payload.sensorAt };
                 if (Number.isFinite(data.generatedAt)) this.clockOffset = data.generatedAt - (started + this.now()) / 2;
             } catch (_) {
                 if (generation !== this.generation) return;

@@ -632,8 +632,8 @@ function renderForecast() {
     setText('forecast-range', estimating ? `ช่วงเวลาตามสถานการณ์ ${clockTime(prediction.earliestAt, now)} ถึง ${clockTime(prediction.latestAt, now)} • ${prediction.rate.toFixed(2)}°C/นาที${prediction.source === 'assumed' ? ' • อัตราสมมติ ±30%' : ' • ไม่ใช่ช่วงความเชื่อมั่นทางสถิติ'}` : '');
     if (!chart) return;
     const future = prediction.points;
-    // Observations use the browser clock; the server returns canonical times.
-    const plotOffset = estimating ? future[0].time - state.sensorAt.temp : coolingForecast.clockOffset;
+    // Align to the observation used for this forecast while newer samples arrive.
+    const plotOffset = estimating ? future[0].time - prediction.observedAt : coolingForecast.clockOffset;
     const past = hasLegacySeries ? temperatureHistory.filter(p => p.time >= cutoff).map(p => ({ x: p.time + plotOffset, y: p.temp })) : [];
     if (hasLegacySeries && temperatureHistory.at(-1) !== lastTemperature) {
         past.push({ x: lastTemperature.time + plotOffset, y: lastTemperature.temp });

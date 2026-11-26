@@ -87,7 +87,40 @@ test('per-second rendering reuses one server request and sends current-setting o
   assert.equal(net.requests.length, 1);
 });
 
-test('late response for a previous temperature cannot overwrite a newer result', async () => {
+test('continuous readings keep the curve and coalesce in-flight updates to the latest reading', async () => {
+  const net = transport();
+  let time = NOW;
+  let input = telemetry();
+  const client = new ForecastClient({ fetch: net.fetch, now: () => time, onChange: () => client.sync(input, 'ac-a') });
+  client.sync(input, 'ac-a');
+  net.requests[0].resolve(response(estimate()));
+  await settle();
+
+  time += 1_000;
+  input = telemetry({ statusAt: time });
+  assert.equal(client.sync(input, 'ac-a').kind, 'estimate');
+  assert.equal(net.requests.length, 1);
+
+  for (const roomTemp of [27.9, 27.8, 27.7]) {
+    time += 1_000;
+    input = telemetry({ sensorAt: time, statusAt: time, roomTemp });
+    assert.equal(client.sync(input, 'ac-a').observedAt, NOW);
+    assert.equal(net.requests.length, 2);
+    assert.equal(net.requests[1].options.signal.aborted, false);
+  }
+
+  const active = JSON.parse(net.requests[1].options.body);
+  net.requests[1].resolve(response(estimate({ generatedAt: active.sensorAt })));
+  await settle();
+  assert.equal(client.result.observedAt, active.sensorAt);
+  assert.equal(net.requests.length, 3);
+  assert.equal(JSON.parse(net.requests[2].options.body).roomTemp, 27.7);
+  net.requests[2].resolve(response(estimate({ generatedAt: time })));
+  await settle();
+  assert.equal(client.result.observedAt, time);
+});
+
+test('late response for a previous setpoint cannot overwrite a newer result', async () => {
   const net = transport(), published = [];
   let client;
   client = new ForecastClient({ fetch: net.fetch, now: () => NOW, onChange: () => published.push(client?.result) });
@@ -141,7 +174,7 @@ test('server failure removes the previous curve and retries only after five seco
   assert.deepEqual(client.result.points, []);
   assert.ok(!client.result.arrivalAt);
   time += 4_999;
-  client.sync(changed, 'ac-a');
+  client.sync({ ...changed, sensorAt: time, roomTemp: 27.9 }, 'ac-a');
   assert.equal(net.requests.length, 2);
   time += 1;
   assert.equal(client.sync(changed, 'ac-a').kind, 'loading');
@@ -178,6 +211,33 @@ test('loss of device freshness immediately hides an estimate', async () => {
   assert.equal(result.kind, 'unavailable');
   assert.deepEqual(result.points, []);
   assert.ok(!result.arrivalAt);
+});
+
+test('loss of freshness clears the active request and its result before fresh readings resume', async () => {
+  const net = transport();
+  let time = NOW;
+  const client = new ForecastClient({ fetch: net.fetch, now: () => time });
+  client.sync(telemetry(), 'ac-a');
+  net.requests[0].resolve(response(estimate()));
+  await settle();
+
+  time += 1_000;
+  const newer = telemetry({ sensorAt: time, roomTemp: 27.9 });
+  assert.equal(client.sync(newer, 'ac-a').kind, 'estimate');
+  time += 30_000;
+  assert.equal(client.sync(newer, 'ac-a').kind, 'unavailable');
+  assert.equal(net.requests[1].options.signal.aborted, true);
+  net.requests[1].resolve(response(estimate()));
+  await settle();
+  assert.equal(client.result, null);
+
+  const recovered = telemetry({ sensorAt: time, statusAt: time });
+  assert.equal(client.sync(recovered, 'ac-a').kind, 'loading');
+  assert.equal(net.requests[2].options.signal.aborted, true);
+  net.requests[2].resolve(response({ kind: 'unavailable', points: [] }));
+  net.requests[3].resolve(response(estimate({ generatedAt: time })));
+  await settle();
+  assert.equal(client.sync(recovered, 'ac-a').kind, 'estimate');
 });
 
 test('server time anchors a stable arrival while the remaining duration counts down', async () => {

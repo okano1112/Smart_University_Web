@@ -107,7 +107,14 @@
         </section>
         <section class="cira-comfort" aria-labelledby="cira-comfort-title">
           <h2 id="cira-comfort-title">คำแนะนำอุณหภูมิ</h2>
-          <p class="text-muted">คำนวณจากสภาพห้องและกิจกรรมล่าสุด</p>
+          <label class="field cira-comfort-mode" for="cira-comfort-mode">
+            วิธีแนะนำ
+            <select id="cira-comfort-mode" aria-describedby="cira-comfort-mode-help">
+              <option value="count">ตามจำนวนคน</option>
+              <option value="activity">ตามท่าทางและการเคลื่อนไหว</option>
+            </select>
+          </label>
+          <p id="cira-comfort-mode-help" class="text-muted">ใช้จำนวนคนล่าสุดและค่าอ้างอิงของห้อง</p>
           <div class="cira-comfort-value" id="cira-comfort-value" hidden>
             <p id="cira-comfort-target" class="cira-comfort-target"></p>
             <p id="cira-comfort-delta" class="text-muted"></p>

@@ -32,6 +32,8 @@
 .cira-activity-counts dd { font-size:22px; font-weight:500; font-variant-numeric:tabular-nums; }
 .cira-activity-note { margin-top:10px; }
 .cira-comfort { border-inline-start:1px solid var(--border); padding-inline-start:25px; }
+.cira-comfort-mode { margin:10px 0 4px; }
+.cira-comfort-mode + .text-muted { font-size:13px; }
 .cira-comfort > .cira-activity-status { margin-top:14px; }
 .cira-comfort-value { display:flex; flex-wrap:wrap; align-items:baseline; gap:0 10px; margin-top:9px; }
 .cira-comfort-value + .cira-activity-status { margin-top:3px; }

@@ -112,34 +112,48 @@ function occupancyWarmup(input) {
  * Without measured radiant temperature, clothing and air speed, it is not PMV.
  */
 function recommendComfort(input, pose, { now = Date.now(), base = 25 } = {}) {
+    const mode = input?.recommendationMode === 'count' ? 'count' : 'activity';
     const roomBase = whole(base, 24, 26) ? base : 25;
     const currentTarget = whole(input?.ac?.temp, 21, 27) ? input.ac.temp : null;
     const evidence = [];
     const result = (status, code, reason, target = null) => ({
-        status, code, reason, target, delta: target === null ? null : target - currentTarget,
+        mode, status, code, reason, target, delta: target === null ? null : target - currentTarget,
         currentTarget, evidence, calculatedAt: now
     });
     const hold = (code, reason) => result('hold', code, reason);
     const unavailable = (code, reason) => result('unavailable', code, reason);
     const activity = pose?.activity;
-    if (!activity || !within(now - activity.captured_at, -1000, POSE_MAX_AGE_MS) || pose.stale) {
-        return unavailable('pose_stale', 'รอผลกิจกรรมล่าสุดจาก CiRA CORE');
+    if (mode === 'activity') {
+        if (!activity || !within(now - activity.captured_at, -1000, POSE_MAX_AGE_MS) || pose.stale) {
+            return unavailable('pose_stale', 'รอผลกิจกรรมล่าสุดจาก CiRA CORE');
+        }
+        if (activity.total_people === 0) return hold('empty', 'ตอนนี้กล้องไม่พบคนในพื้นที่ที่มองเห็น');
+        evidence.push(`กล้องเห็น ${activity.total_people} คน · จำแนกได้ ${activity.total_people - activity.unknown} คน`);
     }
-    if (activity.total_people === 0) return hold('empty', 'ตอนนี้กล้องไม่พบคนในพื้นที่ที่มองเห็น');
-    evidence.push(`กล้องเห็น ${activity.total_people} คน · จำแนกได้ ${activity.total_people - activity.unknown} คน`);
     if (input?.roomMatches !== true) return unavailable('room', 'ข้อมูลเซนเซอร์และแอร์ต้องมาจากห้องเดียวกับกล้อง');
+    const freshCount = within(input.people?.ageMs, 0, SENSOR_MAX_AGE_MS) && whole(input.people.value, 0, 1000);
+    if (mode === 'count') {
+        if (!freshCount) return unavailable('count_stale', 'รอจำนวนคนล่าสุดจาก CiRA CORE');
+        if (input.mqttConnected === true && input.people.value === 0) return hold('empty', 'ตอนนี้ระบบนับคน CiRA ไม่พบคน');
+    }
     if (input?.pending === true) return hold('pending', 'รอผลจากคำสั่งแอร์ก่อนหน้า');
     if (input?.mqttConnected !== true || !within(input?.ac?.ageMs, 0, DEVICE_MAX_AGE_MS) || currentTarget === null ||
         typeof input.ac.power !== 'boolean' || !whole(input.ac.mode, 0, 2)) {
         return unavailable('ac_stale', 'รอสถานะล่าสุดจาก ESP32');
     }
     if (input.ac.power !== true || input.ac.mode !== 0) return hold('ac_mode', 'คำแนะนำใช้เมื่อแอร์เปิดอยู่ในโหมดทำความเย็น');
+    if (mode === 'count') {
+        evidence.push(`CiRA รายงาน ${input.people.value} คน · ค่าอ้างอิงห้อง ${roomBase}°C`);
+        if (currentTarget === roomBase) return hold('keep', 'อุณหภูมิที่ตั้งตรงกับค่าอ้างอิงของห้อง');
+        return result('suggested', 'count_base', 'ขณะนี้มีคนในห้อง จึงแนะนำปรับอุณหภูมิที่ตั้งเข้าหาค่าอ้างอิงทีละ 1°C',
+            currentTarget + Math.sign(roomBase - currentTarget));
+    }
     if (input.sensorFresh !== true || !within(input.temperature?.ageMs, 0, SENSOR_MAX_AGE_MS) ||
         !within(input.humidity?.ageMs, 0, SENSOR_MAX_AGE_MS) ||
         !within(input.temperature.value, 15, 45) || !within(input.humidity.value, 0, 100)) {
         return unavailable('sensors', 'รออุณหภูมิห้องและความชื้นล่าสุด');
     }
-    if (!within(input.people?.ageMs, 0, SENSOR_MAX_AGE_MS) || !whole(input.people.value, 0, 1000)) {
+    if (!freshCount) {
         return unavailable('count_stale', 'รอจำนวนคนจากระบบนับคน CiRA เพื่อเทียบกับผล Skeleton');
     }
     if (input.people.value !== activity.total_people) {

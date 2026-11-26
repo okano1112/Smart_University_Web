@@ -7,6 +7,8 @@
     const FRESH_AC_MS = 75_000;
     const COMFORT_HISTORY_MS = 5 * 60_000;
     const MAX_COMFORT_SAMPLES = 50;
+    const MODE_STORAGE_KEY = 'smartComfortRecommendationModeV1';
+    const AC_KEYS = ['power', 'mode', 'temp', 'fan'];
     const ACTIVITY_KEYS = ['seated', 'standing', 'walking', 'running', 'unknown'];
     const STAGES = {
         received: 'รับข้อมูลกิจกรรม',
@@ -32,6 +34,11 @@
     const target = value => Number.isInteger(value) && range(value, 21, 27);
     const text = (value, max = 200) => typeof value === 'string' ? value.trim().slice(0, max) : '';
     const clock = at => stamp(at) ? timeFormat.format(at) : '—';
+    const validMode = mode => mode === 'count' || mode === 'activity';
+    const freshMeasurement = reading => age(reading?.ageMs) !== null && reading.ageMs < FRESH_SENSOR_MS;
+    const freshPeople = current => count(current.people?.value) && current.people.value > 0 && freshMeasurement(current.people);
+    const freshCooling = current => current.ac?.power === true && current.ac.mode === 0 && target(current.ac.temp) &&
+        age(current.ac.ageMs) !== null && current.ac.ageMs < FRESH_AC_MS;
 
     function readMetrics(value) {
         const input = object(value) ? value : {};
@@ -95,14 +102,15 @@
             };
         }
         const raw = data.recommendation;
+        const mode = raw?.mode === undefined ? 'activity' : raw.mode;
         let recommendation = null;
-        if (object(raw) && Object.hasOwn(RECOMMENDATION_LABELS, raw.status) && stamp(raw.calculatedAt)) {
+        if (object(raw) && validMode(mode) && Object.hasOwn(RECOMMENDATION_LABELS, raw.status) && stamp(raw.calculatedAt)) {
             const next = target(raw.target) ? raw.target : null;
             const current = target(raw.currentTarget) ? raw.currentTarget : null;
             const validSuggestion = next !== null && current !== null && Math.abs(next - current) === 1 && raw.delta === next - current;
             if (raw.status !== 'suggested' || validSuggestion) {
                 recommendation = {
-                    status: raw.status, target: next, currentTarget: current,
+                    mode, status: raw.status, target: next, currentTarget: current,
                     delta: validSuggestion ? raw.delta : null, calculatedAt: raw.calculatedAt,
                     reason: text(raw.reason), evidence: (Array.isArray(raw.evidence) ? raw.evidence.slice(0, 6) : []).map(value => text(value, 150)).filter(Boolean)
                 };
@@ -121,13 +129,13 @@
     }
 
     function canApply(recommendation, current) {
-        const validSensor = key => !!current[key] && age(current[key].ageMs) !== null && current[key].ageMs < FRESH_SENSOR_MS;
+        const mode = recommendation?.mode === undefined ? 'activity' : recommendation.mode;
         return recommendation?.status === 'suggested' && target(recommendation.target) && target(recommendation.currentTarget)
             && Math.abs(recommendation.delta) === 1 && recommendation.target === recommendation.currentTarget + recommendation.delta
             && current.roomMatches === true && current.mqttConnected === true && current.canApply === true && current.pending === false
-            && current.sensorFresh === true && validSensor('temperature') && validSensor('humidity')
-            && current.ac?.power === true && current.ac.mode === 0 && current.ac.temp === recommendation.currentTarget
-            && age(current.ac.ageMs) !== null && current.ac.ageMs < FRESH_AC_MS;
+            && freshCooling(current) && current.ac.temp === recommendation.currentTarget
+            && (mode === 'count' ? freshPeople(current) : mode === 'activity' && current.sensorFresh === true &&
+                freshMeasurement(current.temperature) && freshMeasurement(current.humidity));
     }
 
     function install({ document = root.document, metrics = () => ({}), apply, fetch = (...args) => root.fetch(...args),
@@ -135,6 +143,15 @@
         const $ = id => document?.getElementById(id);
         if (!$('cira-activity-panel')) return null;
         const logs = $('cira-logs'), logRefresh = $('cira-log-refresh'), button = $('cira-comfort-apply');
+        const modeControl = $('cira-comfort-mode'), modeHelp = $('cira-comfort-mode-help');
+        let mode = modeControl ? 'count' : 'activity', modeRevision = 0;
+        if (modeControl) {
+            try {
+                const storedMode = root.localStorage?.getItem(MODE_STORAGE_KEY);
+                if (validMode(storedMode)) mode = storedMode;
+            } catch (_) {}
+            modeControl.value = mode;
+        }
         let record = null, network = 'loading', request = null, pollTimer = null, renderTimer = null;
         let stopped = false, applying = false, feedback = '', logKey = '';
         const visible = () => !stopped && document.visibilityState !== 'hidden';
@@ -148,25 +165,30 @@
             try { return readMetrics(metrics()); } catch (_) { return {}; }
         }
         function view(current, at) {
-            const snapshot = network === 'ready' ? record : null;
+            const snapshot = network !== 'error' ? record : null;
             const pose = snapshot?.data.pose;
             const elapsed = activityAge(snapshot, at);
             const activity = elapsed <= FRESH_ACTIVITY_MS ? pose.activity : null;
-            const parsed = snapshot?.data.recommendation;
+            const candidate = snapshot?.data.recommendation;
+            const parsed = network === 'ready' && candidate?.mode === mode ? candidate : null;
             const ageMs = parsed ? snapshot.data.serverTime - parsed.calculatedAt + Math.max(0, at - snapshot.receivedAt) : Infinity;
             const sent = snapshot?.metrics;
-            const sameInputs = sent && ['temperature', 'humidity', 'people'].every(key => sent[key]?.value === current[key]?.value) &&
-                ['power', 'mode', 'temp', 'fan'].every(key => sent.ac?.[key] === current.ac?.[key]) &&
-                (sent.observedAt - sent.peopleStableMs === current.observedAt - current.peopleStableMs ||
-                    (sent.peopleStableMs === undefined && current.peopleStableMs === undefined));
+            const sameRoomInputs = sent && current.roomMatches === true &&
+                AC_KEYS.every(key => sent.ac?.[key] === current.ac?.[key]);
+            const relevantInputs = sameRoomInputs && (mode === 'count'
+                ? current.mqttConnected === true && current.pending === false && freshPeople(sent) && freshPeople(current) && freshCooling(current)
+                : activity && ['temperature', 'humidity', 'people'].every(key => sent[key]?.value === current[key]?.value) &&
+                    (sent.observedAt - sent.peopleStableMs === current.observedAt - current.peopleStableMs ||
+                        (sent.peopleStableMs === undefined && current.peopleStableMs === undefined)));
             const recommendation = ageMs >= 0 && ageMs <= FRESH_RECOMMENDATION_MS &&
-                (parsed.status !== 'suggested' || (activity && current.roomMatches === true && sameInputs)) ? parsed : null;
+                (parsed.status !== 'suggested' || relevantInputs) ? parsed : null;
             return { pose, activity, elapsed, recommendation };
         }
         function summarize(a) { return `นั่ง ${a.seated} · ยืน ${a.standing} · เดิน ${a.walking} · วิ่ง ${a.running} · ไม่ทราบ ${a.unknown}`; }
         function renderLog(at) {
             if (!logs?.open) return;
-            const data = record?.data, events = data?.pose?.events || [], recommendation = data?.recommendation;
+            const data = record?.data, events = data?.pose?.events || [];
+            const recommendation = data?.recommendation?.mode === mode ? data.recommendation : null;
             const received = events.find(event => event.stage === 'received');
             const checked = events.find(event => ['classified', 'rejected', 'stale'].includes(event.stage));
             update('cira-activity-log-received', received ? `Node-RED รับเมื่อ ${clock(received.at)}` : 'ยังไม่พบข้อมูลเข้า');
@@ -206,6 +228,9 @@
         function render() {
             if (!visible()) return;
             const at = now(), current = currentMetrics(), { activity, pose, elapsed, recommendation } = view(current, at);
+            if (modeControl) modeControl.disabled = applying;
+            if (modeHelp) update('cira-comfort-mode-help', mode === 'count' ? 'ใช้จำนวนคนล่าสุดและค่าอ้างอิงของห้อง'
+                : 'ใช้ท่าทางหรือการเคลื่อนไหวร่วมกับสภาพห้อง');
             const connectionFailed = network === 'error' || (network === 'ready' && !pose);
             const expired = !activity && (pose?.activity || pose?.lastReceivedAt);
             setStatus('cira-activity-status', activity ? `ตรวจพบในผลล่าสุด ${activity.total_people} คน`
@@ -224,8 +249,8 @@
                 : network === 'loading' ? 'กำลังรอคำแนะนำ…' : 'ยังให้คำแนะนำไม่ได้';
             setStatus('cira-comfort-status', recLabel, suggested ? 'ready' : recLabel === 'ยังให้คำแนะนำไม่ได้' ? 'warning' : '');
             update('cira-comfort-reason', recommendation?.reason || (network === 'error' ? 'ติดต่อเซิร์ฟเวอร์เพื่อคำนวณคำแนะนำไม่ได้'
-                : current.roomMatches === false ? 'การเชื่อมต่อหน้านี้ไม่ตรงกับห้องที่ผูกกับกล้อง'
-                    : network === 'ready' ? 'รอข้อมูลกิจกรรมและสภาพห้องล่าสุด' : ''));
+                : current.roomMatches === false ? 'การเชื่อมต่อหน้านี้ไม่ตรงกับห้องที่ตั้งค่าไว้'
+                    : network !== 'ready' ? '' : mode === 'count' ? 'รอจำนวนคนและสถานะ ESP32 ล่าสุด' : 'รอข้อมูลกิจกรรมและสภาพห้องล่าสุด'));
             const evidence = $('cira-comfort-evidence'), findings = recommendation?.evidence || [];
             if (Array.from(evidence.children).map(node => node.textContent).join('\n') !== findings.join('\n')) {
                 evidence.replaceChildren(...findings.map(finding => { const item = document.createElement('li'); item.textContent = finding; return item; }));
@@ -243,7 +268,7 @@
             if (!visible()) return Promise.resolve();
             if (request) return request.promise;
             clearTimeout(pollTimer); pollTimer = null;
-            const task = { controller: new AbortController(), promise: null };
+            const task = { mode, controller: new AbortController(), promise: null };
             request = task;
             task.promise = (async () => {
                 const timeout = setTimeout(() => task.controller.abort(), 4000);
@@ -251,7 +276,7 @@
                     const sent = currentMetrics();
                     const response = await fetch('/api/comfort/recommendation', { method: 'POST', cache: 'no-store',
                         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-                        body: JSON.stringify(sent), signal: task.controller.signal });
+                        body: JSON.stringify({ ...sent, recommendationMode: task.mode }), signal: task.controller.signal });
                     if (!response.ok) throw new Error('Recommendation unavailable');
                     const data = parseResult(await response.json());
                     if (request !== task || !visible()) return;
@@ -273,21 +298,38 @@
             if (!visible() || applying || typeof apply !== 'function') return;
             const current = currentMetrics(), { recommendation } = view(current, now());
             if (!canApply(recommendation, current)) { render(); return; }
+            const revision = modeRevision;
+            const isCurrent = () => visible() && revision === modeRevision;
             applying = true; feedback = 'กำลังตรวจข้อมูลล่าสุดก่อนส่งคำสั่ง…'; render();
             try {
-                const submitted = await apply({ target: recommendation.target, delta: recommendation.delta, recommendation });
-                feedback = submitted === false ? 'ยังไม่ได้ส่งคำสั่ง เพราะสถานะหรือคำแนะนำล่าสุดเปลี่ยนไป'
+                const submitted = await apply({ target: recommendation.target, delta: recommendation.delta, mode, recommendation, isCurrent });
+                if (isCurrent()) feedback = submitted === false ? 'ยังไม่ได้ส่งคำสั่ง เพราะสถานะหรือคำแนะนำล่าสุดเปลี่ยนไป'
                     : `ส่งคำสั่งตั้ง ${recommendation.target}°C แล้ว · รอ ESP32 รายงานสถานะ`;
             } catch (_) {
-                feedback = 'ส่งคำสั่งไม่ได้ กรุณาตรวจการเชื่อมต่อแล้วลองใหม่';
+                if (isCurrent()) feedback = 'ส่งคำสั่งไม่ได้ กรุณาตรวจการเชื่อมต่อแล้วลองใหม่';
             } finally {
                 applying = false; render(); void refresh();
             }
         }
+        function cancelRequest() {
+            const active = request;
+            request = null;
+            active?.controller.abort();
+        }
+        function changeMode() {
+            const next = modeControl.value;
+            if (!validMode(next)) { modeControl.value = mode; return; }
+            if (next === mode) return;
+            mode = next; modeRevision++; feedback = ''; network = 'loading';
+            if (record) record.data.recommendation = null;
+            cancelRequest();
+            try { root.localStorage?.setItem(MODE_STORAGE_KEY, mode); } catch (_) {}
+            render(); void refresh();
+        }
         function cancelPolling() {
             clearInterval(renderTimer); renderTimer = null;
             clearTimeout(pollTimer); pollTimer = null;
-            const active = request; request = null; active?.controller.abort();
+            cancelRequest();
         }
         function syncVisibility() {
             if (!visible()) { cancelPolling(); return; }
@@ -297,11 +339,13 @@
         function stop() {
             stopped = true; cancelPolling();
             button.removeEventListener('click', handleApply);
+            modeControl?.removeEventListener('change', changeMode);
             logs?.removeEventListener('toggle', render);
             logRefresh?.removeEventListener('click', refresh);
             document.removeEventListener('visibilitychange', syncVisibility);
         }
         button.addEventListener('click', handleApply);
+        modeControl?.addEventListener('change', changeMode);
         logs?.addEventListener('toggle', render);
         logRefresh?.addEventListener('click', refresh);
         document.addEventListener('visibilitychange', syncVisibility);

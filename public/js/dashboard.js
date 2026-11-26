@@ -783,7 +783,8 @@ function comfortMetrics() {
     const now = Date.now();
     const age = at => at ? Math.max(0, now - at) : null;
     const roomMatches = ['mqttUrl', 'command', 'status', 'temp', 'humid', 'people'].every(key => settings[key] === DEFAULTS[key]);
-    const sensorFresh = isFreshSensor('temp') && isFreshSensor('humid') && isFreshSensor('people');
+    const sensorFresh = isFreshSensor('temp', now) && isFreshSensor('humid', now);
+    const occupied = isFreshSensor('people', now) && state.people > 0;
     const acAge = state.statusQuality === 'fresh' && state.deviceOnline ? age(state.lastStatusAt) : null;
     const voiceIdle = ['OFF', 'WAIT_CONTINUOUS', 'MIC_PAUSED'].includes(voiceController.state);
     return {
@@ -794,31 +795,37 @@ function comfortMetrics() {
         people: { value: state.people, ageMs: age(state.sensorAt.people) },
         ac: { ...state.ac, ageMs: acAge },
         roomMatches, sensorFresh, mqttConnected: state.mqttConnected, pending: !!state.pending,
-        canApply: roomMatches && sensorFresh && voiceIdle && state.mqttConnected && acAge !== null &&
+        canApply: roomMatches && occupied && voiceIdle && state.mqttConnected && acAge !== null &&
             acAge < DEVICE_STALE_MS && !state.pending && state.ac.power === true && state.ac.mode === 0
     };
 }
-async function applyComfort({ target }) {
+async function applyComfort({ target, mode, isCurrent = () => true }) {
     const metrics = comfortMetrics(), settingRef = settings, connection = mqttClient, revision = state.requestCount;
     const reject = () => { if (!sessionEnded && !sessionSuspended) notice('ข้อมูลเปลี่ยนแล้ว กรุณาตรวจคำแนะนำล่าสุดก่อนกดใช้', 'warning'); return false; };
-    if (!metrics.canApply || !Number.isInteger(target) || target < MIN_TEMP || target > MAX_TEMP ||
+    if (mode !== 'count' && mode !== 'activity') return reject();
+    const countOnly = mode === 'count';
+    const canUseMode = latest => latest.canApply && (countOnly || latest.sensorFresh);
+    if (!isCurrent() || !canUseMode(metrics) || !Number.isInteger(target) || target < MIN_TEMP || target > MAX_TEMP ||
         Math.abs(target - metrics.ac.temp) !== 1) return reject();
     try {
         const response = await appFetch('/api/comfort/recommendation', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(metrics), signal: AbortSignal.timeout(3500), cache: 'no-store'
+            body: JSON.stringify({ ...metrics, recommendationMode: mode, includePose: !countOnly }),
+            signal: AbortSignal.timeout(3500), cache: 'no-store'
         });
         if (!response.ok) return reject();
         const { recommendation, pose } = await response.json();
         const receivedAt = Date.now();
         const validate = () => {
             const latest = comfortMetrics();
-            return latest.canApply && settings === settingRef && mqttClient === connection && state.requestCount === revision &&
-                pose?.activity && !pose.stale && Number.isFinite(pose.ageMs) && pose.ageMs + (Date.now() - receivedAt) <= 5000 && pose.activity.total_people === latest.people.value &&
+            const activityStillMatches = countOnly || (pose?.activity && !pose.stale && Number.isFinite(pose.ageMs) &&
+                pose.ageMs + (Date.now() - receivedAt) <= 5000 && pose.activity.total_people === latest.people.value &&
                 metrics.observedAt - metrics.peopleStableMs === latest.observedAt - latest.peopleStableMs &&
-                recommendation?.status === 'suggested' && recommendation.target === target && recommendation.currentTarget === latest.ac.temp &&
-                ['power', 'mode', 'fan', 'temp'].every(key => metrics.ac[key] === latest.ac[key]) &&
-                ['temperature', 'humidity', 'people'].every(key => metrics[key].value === latest[key].value);
+                ['temperature', 'humidity', 'people'].every(key => metrics[key].value === latest[key].value));
+            return isCurrent() && canUseMode(latest) && settings === settingRef && mqttClient === connection && state.requestCount === revision &&
+                activityStillMatches && recommendation?.mode === mode && recommendation.status === 'suggested' &&
+                recommendation.target === target && recommendation.currentTarget === latest.ac.temp &&
+                ['power', 'mode', 'fan', 'temp'].every(key => metrics.ac[key] === latest.ac[key]);
         };
         if (!validate()) return reject();
         return Boolean(await sendAcCommand({ ...state.ac, temp: target }, `ใช้อุณหภูมิแนะนำ ${target}°C`, { validate })) || reject();

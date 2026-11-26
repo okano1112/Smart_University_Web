@@ -32,7 +32,7 @@ function dashboard() {
     const context = vm.createContext({
         document, window, location, mqtt, URL, DOMException, AbortSignal, AbortController,
         fetch: (resource, options) => new Promise(resolve => requests.push({
-            resource, options, reply: (status, url = '') => resolve({ status, url })
+            resource, options, reply: (status, url = '', body) => resolve({ status, url, ok: status >= 200 && status < 300, json: async () => body })
         })),
         setInterval: () => 1, clearInterval() {}, setTimeout: () => 1, clearTimeout() {},
         SmartCoolingForecastClient: { ForecastClient: class { reset() {} } },
@@ -89,6 +89,43 @@ test('manual MQTT changes await individual session checks and rapid temperature 
     assert.equal(h.published[0].payload.TEMP, 25);
     h.requests.at(-1).reply(204); await h.run('commandQueue');
     assert.deepEqual(h.published.map(item => item.payload.TEMP), [25, 26]);
+});
+
+test('count advice can be applied without pose or ambient readings after a fresh authenticated check', async () => {
+    const h = dashboard(); await h.authorize();
+    h.run(`state.statusQuality = 'fresh'; state.lastStatusAt = Date.now();
+        state.people = 6; state.sensorAt.people = Date.now(); voiceController.state = 'OFF';`);
+    const apply = h.run("applyComfort({ target: 25, mode: 'count', isCurrent: () => true })");
+    const request = h.requests.at(-1);
+    assert.equal(request.resource, '/api/comfort/recommendation');
+    const { recommendationMode, includePose, sensorFresh, people } = JSON.parse(request.options.body);
+    assert.equal(recommendationMode, 'count');
+    assert.equal(includePose, false);
+    assert.equal(sensorFresh, false);
+    assert.equal(people.value, 6);
+    request.reply(200, '', { pose: null, recommendation: { mode: 'count', status: 'suggested', target: 25, currentTarget: 24 } });
+    await tick();
+    assert.equal(h.requests.at(-1).resource, '/api/auth/session');
+    assert.equal(h.published.length, 0);
+    h.run('state.people = 5; state.sensorAt.people = Date.now();');
+    h.requests.at(-1).reply(204);
+    assert.equal(await apply, true);
+    assert.equal(h.published[0].payload.TEMP, 25);
+});
+
+test('count advice cannot send MQTT if the selected mode changes while authorization is pending', async () => {
+    const h = dashboard(); await h.authorize();
+    h.run(`state.statusQuality = 'fresh'; state.lastStatusAt = Date.now();
+        state.people = 6; state.sensorAt.people = Date.now(); voiceController.state = 'OFF';
+        globalThis.countSelected = true;`);
+    const apply = h.run("applyComfort({ target: 25, mode: 'count', isCurrent: () => countSelected })");
+    h.requests.at(-1).reply(200, '', { pose: null, recommendation: { mode: 'count', status: 'suggested', target: 25, currentTarget: 24 } });
+    await tick();
+    assert.equal(h.requests.at(-1).resource, '/api/auth/session');
+    h.run('countSelected = false');
+    h.requests.at(-1).reply(204);
+    assert.equal(await apply, false);
+    assert.equal(h.published.length, 0);
 });
 
 test('same-origin 401 closes resources; late authorized payloads and queued commands cannot publish', async () => {

@@ -9,6 +9,8 @@ const now = 1760000000000;
 const full = { roomMatches: true, mqttConnected: true, sensorFresh: true, pending: false,
     temperature: { value: 26, ageMs: 2000 }, humidity: { value: 56, ageMs: 2000 },
     people: { value: 3, ageMs: 2000 }, ac: { power: true, mode: 0, temp: 25, ageMs: 2000 } };
+const count = { recommendationMode: 'count', roomMatches: true, mqttConnected: true, pending: false,
+    people: full.people, ac: { ...full.ac, temp: 27 } };
 
 function profile(changes = {}, seconds = 25) {
     const activity = { captured_at: now - 500, total_people: 3, seated: 0, standing: 0, walking: 2, running: 1, unknown: 0, ...changes };
@@ -112,6 +114,7 @@ test('upstream snapshot is canonical, allowlisted, and fetched from loopback bef
     const request = { body: { ...full, ...measured(), activity: { total_people: 0 } } };
     await handler(request, { set(key, value) { assert.equal(key, 'Cache-Control'); assert.equal(value, 'no-store'); },
         json(value) { response = value; } });
+    assert.equal(response.recommendation.mode, 'activity');
     assert.equal(response.recommendation.target, 24);
     assert.equal(response.pose.events.length, 1);
     assert.equal(response.pose.events[0].activity.walking, 2);
@@ -124,6 +127,93 @@ test('unavailable Node-RED is distinguishable from a verified empty room', async
     const handler = createComfortHandler({ now: () => now, fetch: async () => new Response(null, { status: 404 }) });
     await handler({ body: full }, { set() {}, json(value) { result = value; } });
     assert.equal(result.pose, null);
+    assert.equal(result.recommendation.mode, 'activity');
+    assert.equal(result.recommendation.code, 'missing_flow');
     assert.equal(result.recommendation.target, null);
     assert.equal(result.bridgeStatus, 'missing_flow');
+});
+
+test('count mode moves one degree toward the room reference without ambient or pose data', () => {
+    const warmer = compute(count, null);
+    assert.equal(warmer.mode, 'count');
+    assert.equal(warmer.status, 'suggested');
+    assert.equal(warmer.target, 26);
+    assert.equal(warmer.delta, -1);
+
+    const colder = { ...count, ac: { ...count.ac, temp: 25 } };
+    const withConflictingPose = recommendComfort(colder, profile({ total_people: 0, walking: 0, running: 0 }), { now, base: 26 });
+    assert.equal(withConflictingPose.target, 26);
+    assert.equal(withConflictingPose.delta, 1);
+
+    const atReference = compute({ ...count, ac: { ...count.ac, temp: 25 } }, null);
+    assert.equal(atReference.mode, 'count');
+    assert.equal(atReference.status, 'hold');
+    assert.equal(atReference.target, null);
+});
+
+test('count mode distinguishes a verified empty room from missing or invalid counts and requires live AC to propose changes', () => {
+    const empty = compute({ ...count, people: { value: 0, ageMs: 0 } }, null);
+    assert.equal(empty.status, 'hold');
+    assert.equal(empty.code, 'empty');
+    for (const [patch, code, status] of [
+        [{ people: null }, 'count_stale', 'unavailable'],
+        [{ people: { value: 0, ageMs: 30_001 } }, 'count_stale', 'unavailable'],
+        [{ people: { value: 2.5, ageMs: 0 } }, 'count_stale', 'unavailable'],
+        [{ roomMatches: false }, 'room', 'unavailable'],
+        [{ mqttConnected: false }, 'ac_stale', 'unavailable'],
+        [{ ac: { ...count.ac, ageMs: 75_001 } }, 'ac_stale', 'unavailable'],
+        [{ ac: { ...count.ac, power: false } }, 'ac_mode', 'hold'],
+        [{ ac: { ...count.ac, mode: 1 } }, 'ac_mode', 'hold'],
+        [{ pending: true }, 'pending', 'hold']
+    ]) {
+        const advice = compute({ ...count, ...patch }, null);
+        assert.equal(advice.mode, 'count');
+        assert.equal(advice.code, code);
+        assert.equal(advice.status, status);
+        assert.equal(advice.target, null);
+    }
+});
+
+async function postComfort(handler, body) {
+    let status = 200, response;
+    await handler({ body }, { set() {}, status(code) { status = code; return this; },
+        json(value) { response = value; } });
+    return { status, response };
+}
+
+test('count route returns available pose data by default and keeps advice independent of bridge failures', async () => {
+    for (const [fetch, bridgeStatus] of [
+        [async () => Response.json({ source: 'cira', stale: false, serverTime: now, events: [], ...profile() }), 'ready'],
+        [async () => new Response(null, { status: 404 }), 'missing_flow'],
+        [async () => { throw new Error('Node-RED unreachable'); }, 'offline']
+    ]) {
+        const { status, response } = await postComfort(createComfortHandler({ now: () => now, base: 25, fetch }), count);
+        assert.equal(status, 200);
+        assert.equal(response.bridgeStatus, bridgeStatus);
+        assert.equal(response.pose?.activity?.total_people ?? null, bridgeStatus === 'ready' ? 3 : null);
+        assert.equal(response.recommendation.mode, 'count');
+        assert.equal(response.recommendation.target, 26);
+    }
+});
+
+test('only count may skip pose reads, and bad explicit modes never reach the bridge', async () => {
+    let reads = 0;
+    const handler = createComfortHandler({ now: () => now, base: 25, fetch: async () => {
+        reads++;
+        return new Response(null, { status: 404 });
+    } });
+    for (const recommendationMode of ['invalid', '', null, false]) {
+        assert.equal((await postComfort(handler, { ...count, recommendationMode })).status, 400);
+    }
+    const skipped = (await postComfort(handler, { ...count, includePose: false })).response;
+    assert.equal(reads, 0);
+    assert.equal(skipped.pose, null);
+    assert.equal(skipped.bridgeStatus, 'not_requested');
+    assert.equal(skipped.recommendation.target, 26);
+
+    const required = (await postComfort(handler, { ...full, recommendationMode: 'activity', includePose: false })).response;
+    assert.equal(reads, 1);
+    assert.equal(required.recommendation.mode, 'activity');
+    assert.equal(required.recommendation.code, 'missing_flow');
+    assert.equal(required.recommendation.target, null);
 });

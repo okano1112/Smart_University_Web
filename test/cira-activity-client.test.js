@@ -85,32 +85,60 @@ test('manual apply requires the same live AC, room and temperature recommendatio
     }
 });
 
+test('count recommendations can apply with a fresh positive count and recent ESP32 state alone', () => {
+    const rec = recommendation({ mode: 'count' });
+    const current = metrics({ temperature: undefined, humidity: undefined, sensorFresh: false, people: { value: 4, ageMs: 0 } });
+    assert.equal(canApply(rec, current), true);
+    assert.equal(canApply(recommendation(), current), false);
+    for (const patch of [
+        { people: undefined }, { people: { value: 0, ageMs: 0 } }, { people: { value: 4, ageMs: 30_000 } },
+        { roomMatches: false }, { mqttConnected: false }, { pending: true }, { canApply: false },
+        { ac: { ...current.ac, mode: 1 } }, { ac: { ...current.ac, ageMs: 75_000 } }
+    ]) assert.equal(canApply(rec, { ...current, ...patch }), false);
+    assert.equal(parseResult(data()).recommendation.mode, 'activity');
+    assert.equal(parseResult(data({ pose: null, recommendation: rec })).recommendation.mode, 'count');
+    assert.equal(parseResult(data({ recommendation: { ...rec, mode: 'unknown' } })).recommendation, null);
+});
+
 class Element extends EventTarget {
     constructor() { super(); this.textContent = ''; this.children = []; this.dataset = {}; this.hidden = true; this.disabled = true; }
     append(...children) { this.children.push(...children); }
     replaceChildren(...children) { this.children = children; }
 }
 
-function fixture() {
+function fixture({ withMode = false, initialMetrics = metrics(), initialResponse = data() } = {}) {
     const document = new EventTarget();
     const elements = new Map();
     document.visibilityState = 'visible';
     document.createElement = () => new Element();
     const $ = document.getElementById = id => {
+        if (!withMode && ['cira-comfort-mode', 'cira-comfort-mode-help'].includes(id)) return null;
         if (!elements.has(id)) elements.set(id, new Element());
         return elements.get(id);
     };
-    const requests = [], commands = [];
-    let snapshot = metrics(), response = data(), now = NOW, fail = false;
+    const requests = [], commands = [], heldResponses = [], heldApplies = [];
+    let snapshot = initialMetrics, response = initialResponse, now = NOW, fail = false, holdResponse = false, holdApply = false;
     const client = install({ document, now: () => now, metrics: () => snapshot,
         fetch: async (url, options) => {
             requests.push({ url, options });
             if (fail) throw new Error('offline');
+            if (holdResponse) {
+                holdResponse = false;
+                return new Promise(resolve => heldResponses.push(value => resolve({ ok: true, json: async () => value })));
+            }
             return { ok: true, json: async () => response };
         },
-        apply: async command => { commands.push(command); return true; }
+        apply: async command => {
+            commands.push(command);
+            if (!holdApply) return true;
+            holdApply = false;
+            return new Promise(resolve => heldApplies.push(resolve));
+        }
     });
     return { $, client, commands, requests,
+        heldResponses, heldApplies,
+        holdResponse: () => { holdResponse = true; }, holdApply: () => { holdApply = true; },
+        select: value => { $('cira-comfort-mode').value = value; $('cira-comfort-mode').dispatchEvent(new Event('change')); },
         metrics: value => { snapshot = value; }, response: value => { response = value; },
         time: value => { now = value; }, offline: value => { fail = value; },
         click: () => $('cira-comfort-apply').dispatchEvent(new Event('click')),
@@ -125,6 +153,7 @@ test('room flow renders fresh counts and recommendation, applies only on click, 
         const button = h.$('cira-comfort-apply');
         assert.equal(h.requests[0].url, '/api/comfort/recommendation');
         assert.equal(h.requests[0].options.method, 'POST');
+        assert.equal(JSON.parse(h.requests[0].options.body).recommendationMode, 'activity');
         assert.equal(h.$('cira-walking').textContent, '3');
         assert.equal(h.$('cira-seated').textContent, '0');
         assert.equal(h.$('cira-comfort-target').textContent, '24°C');
@@ -143,6 +172,95 @@ test('room flow renders fresh counts and recommendation, applies only on click, 
         assert.equal(button.hidden, true);
         h.click(); await tick();
         assert.equal(h.commands.length, 1);
+    } finally { h.client.stop(); }
+});
+
+test('the default count mode recommends without pose or room sensors and keeps activity separate', async () => {
+    const initialMetrics = metrics({ temperature: undefined, humidity: undefined, sensorFresh: false, people: { value: 6, ageMs: 500 } });
+    const rec = recommendation({ mode: 'count', reason: 'ปรับเข้าใกล้ค่าอ้างอิงตามจำนวนคน' });
+    const h = fixture({ withMode: true, initialMetrics, initialResponse: data({ pose: null, recommendation: rec }) });
+    try {
+        await tick();
+        const button = h.$('cira-comfort-apply');
+        const sent = JSON.parse(h.requests[0].options.body);
+        assert.equal(h.$('cira-comfort-mode').value, 'count');
+        assert.match(h.$('cira-comfort-mode-help').textContent, /จำนวนคนล่าสุด/);
+        assert.equal(sent.recommendationMode, 'count');
+        assert.equal(sent.temperature, undefined);
+        assert.equal(sent.humidity, undefined);
+        assert.equal(h.$('cira-walking').textContent, '—');
+        assert.equal(h.$('cira-comfort-target').textContent, '24°C');
+        assert.equal(button.disabled, false);
+        h.click();
+        await tick();
+        assert.equal(h.commands[0].mode, 'count');
+        assert.equal(h.commands[0].target, 24);
+        assert.equal(h.commands[0].isCurrent(), true);
+
+        h.response(data({ recommendation: rec }));
+        await h.client.refresh();
+        h.metrics(metrics({ temperature: { value: 28, ageMs: 0 }, humidity: { value: 62, ageMs: 0 }, people: { value: 5, ageMs: 0 } }));
+        h.openLog();
+        assert.equal(h.$('cira-walking').textContent, '3');
+        assert.equal(h.$('cira-activity-log-events').children.length, 2);
+        assert.equal(h.$('cira-comfort-target').textContent, '24°C');
+        assert.equal(button.disabled, false);
+
+        for (const people of [{ value: 0, ageMs: 0 }, { value: 5, ageMs: 30_000 }]) {
+            h.metrics({ ...initialMetrics, people });
+            h.openLog();
+            assert.equal(h.$('cira-comfort-target').textContent, '');
+            assert.equal(button.hidden, true);
+            h.click(); await tick();
+            assert.equal(h.commands.length, 1);
+        }
+    } finally { h.client.stop(); }
+});
+
+test('switching recommendation mode clears prior advice and ignores a late response', async () => {
+    const countResponse = data({ recommendation: recommendation({ mode: 'count' }) });
+    const activityResponse = data({ recommendation: recommendation({ mode: 'activity', target: 26, delta: 1 }) });
+    const h = fixture({ withMode: true, initialResponse: countResponse });
+    try {
+        await tick();
+        assert.equal(h.$('cira-comfort-target').textContent, '24°C');
+        h.holdResponse();
+        const oldRequest = h.client.refresh();
+        const oldSignal = h.requests.at(-1).options.signal;
+        h.response(activityResponse);
+
+        h.select('activity');
+        assert.equal(oldSignal.aborted, true);
+        assert.equal(h.$('cira-comfort-target').textContent, '');
+        assert.equal(h.$('cira-comfort-apply').hidden, true);
+        assert.equal(h.$('cira-walking').textContent, '3');
+        assert.match(h.$('cira-comfort-mode-help').textContent, /ท่าทางหรือการเคลื่อนไหว/);
+        assert.equal(JSON.parse(h.requests.at(-1).options.body).recommendationMode, 'activity');
+        await tick();
+        assert.equal(h.$('cira-comfort-target').textContent, '26°C');
+
+        h.heldResponses[0](countResponse);
+        await oldRequest;
+        assert.equal(h.$('cira-comfort-target').textContent, '26°C');
+    } finally { h.client.stop(); }
+});
+
+test('changing away and back invalidates an in-flight apply from the old mode selection', async () => {
+    const h = fixture({ withMode: true, initialResponse: data({ recommendation: recommendation({ mode: 'count' }) }) });
+    try {
+        await tick();
+        h.holdApply();
+        h.click();
+        assert.equal(h.$('cira-comfort-mode').disabled, true);
+        const command = h.commands[0];
+        assert.equal(command.isCurrent(), true);
+        h.select('activity');
+        h.select('count');
+        assert.equal(command.isCurrent(), false);
+        h.heldApplies[0](false);
+        await tick();
+        assert.equal(h.$('cira-comfort-mode').disabled, false);
+        assert.equal(h.$('cira-comfort-feedback').textContent, '');
     } finally { h.client.stop(); }
 });
 

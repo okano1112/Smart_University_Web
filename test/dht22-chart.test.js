@@ -117,6 +117,7 @@ async function dashboard() {
         send, snapshot, subscriptions, forecastInputs, visible, client,
         sample: temperature => ({ temperature, humidity: 45, captured_at: now }),
         advance: ms => { now += ms; intervals.get(1000)(); },
+        text: id => elements.get(id).textContent,
         status: () => elements.get('dht22-chart-status').textContent,
         legendHidden: id => elements.get(id).hidden
     };
@@ -173,6 +174,75 @@ test('fresh legacy temperature counts as one point only while no identified DHT2
     h.advance(15000);
     assert.match(h.status(), /รอข้อมูล DHT22/);
     assert.deepEqual(h.visible(0), []);
+});
+
+test('legacy chart labels recent history during an MQTT outage and resumes live readings after reconnect', async () => {
+    const h = await dashboard();
+    const legacy = 'spu/classroom/middle/temp';
+    const statusTopic = 'spu/classroom/status';
+    const status = { power: 'ON', temp: 24, mode: 'COOL', fan: 'HIGH' };
+    h.send(statusTopic, status);
+    h.send(legacy, 26.2);
+    h.advance(10_000);
+    h.send(legacy, 26.3);
+    await flush();
+    h.send(legacy, 28, true);
+    assert.equal(h.text('forecast-current'), '26.3°C');
+    assert.equal(h.text('forecast-target'), '24°C');
+    assert.ok(h.visible(4).length > 0);
+
+    h.advance(1000);
+    h.client.emit('offline');
+    assert.equal(h.text('forecast-current'), '26.3°C');
+    assert.match(h.text('forecast-current-note'), /ข้อมูลย้อนหลัง/);
+    assert.equal(h.text('forecast-target'), '24°C');
+    assert.match(h.text('forecast-target-note'), /ข้อมูลย้อนหลัง/);
+    assert.match(h.status(), /ข้อมูลย้อนหลัง/);
+    assert.equal(h.visible(0).at(-1).y, 26.3);
+    assert.ok(h.visible(1).some(point => point.y === 24));
+    assert.deepEqual(h.visible(4), []);
+    assert.equal(h.text('forecast-arrival'), '—');
+
+    h.advance(5000);
+    h.client.emit('connect');
+    h.send(statusTopic, status);
+    h.send(legacy, 25.8);
+    await flush();
+    assert.equal(h.text('forecast-current'), '25.8°C');
+    assert.doesNotMatch(h.text('forecast-current-note'), /ข้อมูลย้อนหลัง/);
+    assert.equal(h.text('forecast-target'), '24°C');
+    assert.doesNotMatch(h.text('forecast-target-note'), /ข้อมูลย้อนหลัง/);
+    assert.equal(h.status(), 'ตรวจพบเซนเซอร์ 1 ตัว (ช่องเดิม)');
+    assert.deepEqual(h.visible(0).slice(-3).map(point => point.y), [26.3, null, 25.8]);
+    assert.ok(h.visible(4).length > 0);
+});
+
+test('legacy temperature becomes historical after 30 seconds and ages out of the chart', async () => {
+    const h = await dashboard();
+    h.send('spu/classroom/status', { power: 'ON', temp: 24, mode: 'COOL', fan: 'HIGH' });
+    h.send('spu/classroom/middle/temp', 26.3);
+    await flush();
+    assert.ok(h.visible(4).length > 0);
+
+    h.advance(30_000);
+    assert.equal(h.text('forecast-current'), '26.3°C');
+    assert.match(h.text('forecast-current-note'), /ข้อมูลย้อนหลัง/);
+    assert.equal(h.text('forecast-target'), '24°C');
+    assert.doesNotMatch(h.text('forecast-target-note'), /ข้อมูลย้อนหลัง/);
+    assert.match(h.status(), /ข้อมูลย้อนหลัง/);
+    assert.deepEqual(h.visible(0).map(point => point.y), [26.3]);
+    assert.deepEqual(h.visible(4), []);
+
+    h.advance(50_000);
+    assert.match(h.text('forecast-target-note'), /ข้อมูลย้อนหลัง/);
+    const targetEnd = h.visible(1).findLast(point => point.y === 24);
+    assert.equal(targetEnd.x, h.visible(0)[0].x + 75_000);
+    assert.equal(h.visible(1).at(-1).y, null);
+
+    h.advance(15 * 60_000 - 80_000 + 1);
+    assert.deepEqual(h.visible(0), []);
+    assert.equal(h.text('forecast-current'), '—');
+    assert.deepEqual(h.visible(4), []);
 });
 
 test('dashboard shows two fresh DHT22 lines even when divergent, then removes them independently', async () => {

@@ -804,6 +804,13 @@ p+p {
   margin-top:4px;
   font-variant-numeric:tabular-nums
 }
+.forecast-reading-note {
+  display:block;
+  color:var(--muted);
+  font-size:12px;
+  font-weight:400;
+  line-height:1.4
+}
 .forecast-readings .arrival-reading dd {
   color:var(--brand-dark);
   font-size:24px
@@ -890,6 +897,9 @@ p+p {
 }
 .chart-panel #forecast-detail,.chart-panel #forecast-range {
   font-size:12px
+}
+.chart-panel #forecast-detail:empty,.chart-panel #forecast-range:empty {
+  display:none
 }
 .advanced-settings {
   border-top:1px solid var(--border);
